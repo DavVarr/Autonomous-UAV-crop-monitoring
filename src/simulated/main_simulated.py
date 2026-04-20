@@ -3,7 +3,7 @@ import time
 import logging
 from math import fabs
 from mavsdk import System
-from mavsdk.offboard import VelocityNedYaw, OffboardError
+from mavsdk.offboard import VelocityNedYaw, OffboardError, PositionNedYaw
 from mavsdk.mission import MissionItem, MissionPlan, MissionError
 from mavsdk.action import OrbitYawBehavior
 import numpy as np
@@ -195,7 +195,7 @@ async def run():
 
         if not arucoFound is None:
             print("Aruco located!")
-            result = await align_to_aruco(drone, video, detector, mtx, dist, item)
+            result = await align_to_aruco_ned(drone, video, detector, mtx, dist, item)
 
             if result is False:
                 print("Aruco alignment failed!")
@@ -265,6 +265,117 @@ async def aruco_search(drone: System, video: Video, detector: aruco.ArucoDetecto
     print("Aruco search failed, awaiting the drone to navigate to the initial position")
     await asyncio.sleep(5)
     return None
+
+
+async def align_to_aruco_ned(drone: System, video: Video, detector: aruco.ArucoDetector, mtx, dist, item: MissionItem):
+    print("Starting NED alignment procedure")
+    battery = await fc.get_drone_remaining_battery(drone)
+    logging.info(f"Started NED aruco alignment with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
+
+    aruco_detection_failures = 0
+    procedure_failures = 0
+    lined_up = False
+
+    initial_ned_position = await fc.get_drone_ned_position(drone)
+    initial_heading = await fc.get_drone_heading(drone)
+    heading = initial_heading
+
+    # Prepare a setpoint before activating offboard mode
+    await drone.offboard.set_position_ned(PositionNedYaw(
+        initial_ned_position.north_m,
+        initial_ned_position.east_m,
+        initial_ned_position.down_m,
+        initial_heading
+    ))
+
+    try:
+        await drone.offboard.start()
+        print("Offboard mode engaged for alignment!")
+    except OffboardError as error:
+        print(f"Starting offboard mode failed: {error._result.result}")
+        return False
+    
+    while True:
+        aruco_distances = utilities.get_aruco_distances_and_yaw(video, detector, mtx, dist)
+
+        # --- Detection failure handling ---
+        if aruco_distances is None:
+            aruco_detection_failures += 1
+            print(f"Aruco not found for {aruco_detection_failures} times")
+
+            if aruco_detection_failures >= ALIGNMENT_MAX_DETECTION_FAILURES:
+                if procedure_failures < ALIGNMENT_MAX_PROCEDURE_FAILURES:
+                    print("Aruco detection failed, retrying from initial NED position")
+                    await drone.offboard.set_position_ned(PositionNedYaw(
+                        initial_ned_position.north_m,
+                        initial_ned_position.east_m,
+                        initial_ned_position.down_m,
+                        initial_heading
+                    ))
+                    aruco_detection_failures = 0
+                    procedure_failures += 1
+                    print("Awaiting drone to navigate to initial position")
+                    await asyncio.sleep(10)
+                else:
+                    print("Aruco detection failed multiple times, aborting alignment")
+                    await drone.offboard.stop()
+                    return False
+            continue
+
+        # --- Marker detected ---
+        aruco_detection_failures = 0
+
+        target_ned = await utilities.calculate_target_ned_position(drone, aruco_distances)
+        
+        vertical_delta = aruco_distances[2] - ALIGNMENT_TARGET_ALTITUDE
+
+        current_ned = await fc.get_drone_ned_position(drone)
+
+        if fabs(aruco_distances[0]) < ALIGNMENT_LINEUP_DISTANCE and fabs(aruco_distances[1]) < ALIGNMENT_LINEUP_DISTANCE:
+            lined_up = True
+
+            # Once lined up, start correcting altitude and yaw gradually
+            corrected_down = current_ned.down_m + (fabs(vertical_delta * ALIGNMENT_MANOUVRES_FACTOR) * utilities.sign(vertical_delta))
+            heading = (await fc.get_drone_heading(drone) + (aruco_distances[3] * ALIGNMENT_MANOUVRES_FACTOR)) % 360
+            
+            target_ned.down_m = corrected_down
+            target_ned.yaw_deg = heading
+
+        else:
+            # Not yet lined up horizontally: hold initial altitude
+            if not lined_up: target_ned.down_m = initial_ned_position.down_m
+
+        # --- Termination check ---
+        yaw_ok = aruco_distances[3] < ALIGNMENT_YAW_MIN_DISTANCE or aruco_distances[3] > ALIGNMENT_YAW_MAX_DISTANCE
+        position_ok = (
+            fabs(aruco_distances[0]) < ALIGNMENT_MAX_ERROR_DISTANCE and
+            fabs(aruco_distances[1]) < ALIGNMENT_MAX_ERROR_DISTANCE and
+            fabs(vertical_delta)     < ALIGNMENT_MAX_ERROR_DISTANCE and
+            yaw_ok
+        )
+
+        if position_ok:
+            # Hold in place: send current NED position as setpoint
+            await drone.offboard.set_position_ned(PositionNedYaw(
+                current_ned.north_m,
+                current_ned.east_m,
+                current_ned.down_m,
+                heading
+            ))
+            await asyncio.sleep(3)
+
+            # Climb back to initial altitude before resuming mission
+            await drone.offboard.set_position_ned(PositionNedYaw(
+                current_ned.north_m,
+                current_ned.east_m,
+                initial_ned_position.down_m,
+                heading
+            ))
+            await asyncio.sleep(7)
+            await drone.offboard.stop()
+            return True
+
+        await drone.offboard.set_position_ned(target_ned)
 
 async def align_to_aruco(drone: System, video: Video, detector: aruco.ArucoDetector, mtx, dist, item: MissionItem):
     print("Starting alignment procedure")

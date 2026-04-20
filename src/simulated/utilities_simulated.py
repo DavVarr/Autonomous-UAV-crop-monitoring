@@ -70,7 +70,7 @@ def get_aruco_distances_and_yaw(video: Video, detector, mtx, dist) -> list[float
         right_distance = tvecs[0][0][0]
         vertical_distance = tvecs[0][2][0]
 
-        yaw_difference = normalize_heading(degrees(rvecs[0][2][0]) - 90)
+        yaw_difference = normalize_heading(degrees(rvecs[0][2][0]))
 
         return [forward_distance, right_distance, vertical_distance, yaw_difference]
 
@@ -80,12 +80,12 @@ async def calculate_target_ned_position(drone: System, aruco_distances: list[flo
     current_heading = await fc.get_drone_heading(drone)
 
 
-    ned_vector = rotate_vector(aruco_distances[0], aruco_distances[1], 0)
+    ned_vector = rotate_vector(aruco_distances[0], aruco_distances[1], current_heading)
 
     target_position = PositionNedYaw(
         ned_vector[0] + current_ned_position.north_m,
         ned_vector[1] + current_ned_position.east_m,
-        current_ned_position.down_m + aruco_distances[2],
+        current_ned_position.down_m,
         current_heading)
     
     return target_position
