@@ -1,5 +1,5 @@
 from mavsdk.telemetry import PositionNed, Position
-from mavsdk.offboard import PositionNedYaw
+from mavsdk.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed
 from camera_simulated import checkArucoPresence, Video
 from math import fabs, degrees, radians, pi, cos, sin, sqrt, atan2, asin
 import numpy as np
@@ -139,3 +139,72 @@ def normalize_heading(heading: float):
     if heading < -180: return heading + 360
     elif heading > 180: return heading - 360
     else: return heading
+
+
+async def look_for_aruco_orbit(drone : System, video : Video, detector, mtx, dist,
+                         center_ned : PositionNed, heading, radius, speed):
+    omega = speed / radius
+    accumulated_angle = 0.0
+    prev_radial = None
+
+    # Fly to orbit start point
+    start = PositionNedYaw(
+        center_ned.north_m + radius,
+        center_ned.east_m,
+        center_ned.down_m,
+        heading
+    )
+    await fc.fly_to_ned(drone, start, 0.3)
+
+    while accumulated_angle < 2 * pi:  # one full orbit
+        current_ned = await fc.get_drone_ned_position(drone)
+
+        dx = current_ned.north_m - center_ned.north_m
+        dy = current_ned.east_m  - center_ned.east_m
+        current_radius = sqrt(dx**2 + dy**2)
+
+        if current_radius < 1e-3:
+            continue
+
+        radial_x = dx / current_radius
+        radial_y = dy / current_radius
+
+        # Accumulate swept angle using cross product between consecutive radials
+        if prev_radial is not None:
+            # cross product gives sine of angle between vectors
+            # dot product gives cosine
+            cross = prev_radial[0] * radial_y - prev_radial[1] * radial_x
+            dot   = prev_radial[0] * radial_x + prev_radial[1] * radial_y
+            delta_angle = atan2(cross, dot)  # signed angle increment
+            accumulated_angle += fabs(delta_angle)
+
+        prev_radial = (radial_x, radial_y)
+
+        # Tangential velocity
+        vn = -radial_y * speed
+        ve =  radial_x * speed
+
+        # Radial correction
+        radius_error = radius - current_radius
+        vn += radius_error * radial_x
+        ve += radius_error * radial_y
+
+        # Centripetal acceleration feedforward
+        an = -radial_x * speed**2 / radius
+        ae = -radial_y * speed**2 / radius
+
+        await drone.offboard.set_position_velocity_acceleration_ned(
+            PositionNedYaw(float('nan'), float('nan'), center_ned.down_m, heading),
+            VelocityNedYaw(vn, ve, 0.0, heading),
+            AccelerationNed(an, ae, 0.0)
+        )
+
+        result = get_aruco_distances_and_yaw(video, detector, mtx, dist)
+        if result is not None:
+            target_ned = await calculate_target_ned_position(drone,result)
+
+            await drone.offboard.set_position_ned(target_ned)
+            #await asyncio.sleep(0.5)
+            return result
+
+    return None  # completed full orbit without finding aruco

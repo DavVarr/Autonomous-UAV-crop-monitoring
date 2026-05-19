@@ -1,8 +1,10 @@
 from mavsdk import System
-from mavsdk.telemetry import Position, PositionNed, FlightMode, Battery
-from mavsdk.offboard import PositionNedYaw, VelocityBodyYawspeed
+from mavsdk.telemetry import Position, PositionNed, FlightMode, Battery, PositionVelocityNed
+from mavsdk.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed, VelocityBodyYawspeed, PositionGlobalYaw
 from mavsdk.mission import MissionItem, MissionProgress
-from math import radians, cos, fabs
+from math import radians, cos, fabs, sqrt
+import ruckig
+#from ruckig import Ruckig, InputParameter, OutputParameter, Result
 import asyncio
 
 async def get_drone_home_position(drone: System) -> Position:
@@ -13,6 +15,10 @@ async def get_drone_global_position(drone: System) -> Position:
     async for position in drone.telemetry.position():
         return position
 
+async def get_drone_ned_position_velocity(drone: System) -> PositionVelocityNed:
+    async for position_velocity in drone.telemetry.position_velocity_ned():
+        return position_velocity
+    
 async def get_drone_ned_position(drone: System) -> PositionNed:
     async for position_velocity in drone.telemetry.position_velocity_ned():
         return position_velocity.position
@@ -85,7 +91,7 @@ async def check_ned_position_reached(drone: System, target_position: PositionNed
                             (position_velocity.down_m - target_position.down_m) ** 2) ** 0.5
 
     if distance_to_target < tolerance:
-        print("Position reached")
+        #print("Position reached")
         return True
     else:
         return False
@@ -118,3 +124,91 @@ async def move_locally(forward: float, right: float, down: float, yaw: float, dr
     await asyncio.sleep(highest_value)
     await drone.offboard.set_velocity_body(stop)
     await asyncio.sleep(1)
+
+async def fly_to_ned(drone: System, target: PositionNedYaw, threshold: float):
+    """Send position setpoint and wait until within threshold metres."""
+    while True:
+        await drone.offboard.set_position_ned(target)
+        current = await get_drone_ned_position(drone)
+        dist = sqrt(
+            (target.north_m - current.north_m) ** 2 +
+            (target.east_m  - current.east_m)  ** 2
+        )
+        if dist < threshold:
+            return
+        await asyncio.sleep(0.1)
+
+def horizontal_distance(lat1, lon1, lat2, lon2):
+    """Quick flat-earth approximation, good enough for small distances"""
+    R = 6378137.0
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = dlat**2 + (cos(radians(lat1)) * dlon)**2
+    return R * sqrt(a)
+
+async def fly_to_global(drone : System, target_lat, target_lon, target_alt, threshold=0.5):
+    STEP_FACTOR = 0.6
+
+    while True:
+        pos = await get_drone_global_position(drone)
+        
+        dist = horizontal_distance(
+            pos.latitude_deg, pos.longitude_deg,
+            target_lat, target_lon
+        )
+        
+        if dist < threshold:
+            return
+
+        # Intermediate point a fraction of the way toward target
+        interp_lat = pos.latitude_deg + (target_lat - pos.latitude_deg) * STEP_FACTOR
+        interp_lon = pos.longitude_deg + (target_lon - pos.longitude_deg) * STEP_FACTOR
+
+        await drone.offboard.set_position_global(
+            PositionGlobalYaw(
+                interp_lat,
+                interp_lon,
+                target_alt,
+                float('nan'),
+                PositionGlobalYaw.AltitudeType.REL_HOME
+            )
+        )
+
+
+async def fly_to_ned_smooth(drone: System,
+                            target: PositionNedYaw,
+                            threshold: float = 0.3):
+    LOOP_RATE = 0.01
+    MAX_VELOCITY     = 10.0   # MPC_XY_CRUISE  (m/s)
+    MAX_ACCELERATION = 3.0   # MPC_ACC_HOR    (m/s²)
+    MAX_JERK         = 4.0   # MPC_JERK_MAX   (m/s³)
+
+    otg = ruckig.Ruckig(3, LOOP_RATE)
+    inp = ruckig.InputParameter(3)
+    out = ruckig.OutputParameter(3)
+    pos =await get_drone_ned_position(drone)
+    inp.current_position = [pos.north_m, pos.east_m, pos.down_m]
+    inp.current_velocity = [0.0, 0.0, 0.0]
+    inp.current_acceleration = [0.0, 0.0, 0.0]
+    inp.target_position     = [target.north_m, target.east_m, target.down_m]
+    inp.target_velocity     = [0.0, 0.0, 0.0]
+    inp.target_acceleration = [0.0, 0.0, 0.0]
+    inp.max_velocity        = [MAX_VELOCITY] * 3
+    inp.max_acceleration    = [MAX_ACCELERATION] * 3
+    inp.max_jerk            = [MAX_JERK] * 3
+    res = ruckig.Result.Working
+    while  res == ruckig.Result.Working:
+        res = otg.update(inp, out)
+
+        p = out.new_position
+        v = out.new_velocity
+        a = out.new_acceleration
+        await drone.offboard.set_position_ned(PositionNedYaw(p[0], p[1], p[2], target.yaw_deg))
+        """await drone.offboard.set_position_velocity_acceleration_ned(
+            PositionNedYaw(p[0], p[1], p[2], target.yaw_deg),
+            VelocityNedYaw(v[0], v[1], v[2], target.yaw_deg),
+            AccelerationNed(a[0], a[1], a[2])
+        )"""
+
+        out.pass_to_input(inp)
+        await asyncio.sleep(LOOP_RATE)

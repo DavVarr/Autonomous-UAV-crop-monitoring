@@ -201,6 +201,9 @@ def checkArucoPresence(video: Video, detector, mtx, dist):
         frame.setflags(True)
 
         markerCorners, markerIds, rejectedCandidates = detector.detectMarkers(frame)
+
+        #cv2.imshow("Drone View", frame)
+        #cv2.waitKey(1) 
         if not markerIds is None:
             return my_estimatePoseSingleMarkers(markerCorners, 0.5, mtx, dist)
         else:

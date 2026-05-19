@@ -1,11 +1,12 @@
 import asyncio
 import time
 import logging
-from math import fabs
+from math import fabs, pi, sin, cos
 from mavsdk import System
-from mavsdk.offboard import VelocityNedYaw, OffboardError, PositionNedYaw
+from mavsdk.offboard import VelocityNedYaw, OffboardError, PositionNedYaw, PositionGlobalYaw
 from mavsdk.mission import MissionItem, MissionPlan, MissionError
 from mavsdk.action import OrbitYawBehavior
+from mavsdk.telemetry import Position
 import numpy as np
 import cv2.aruco as aruco
 
@@ -27,9 +28,11 @@ ALIGNMENT_MAX_ERROR_DISTANCE = 0.5
 ALIGNMENT_YAW_MAX_DISTANCE = 355
 ALIGNMENT_YAW_MIN_DISTANCE = 5
 ALIGNMENT_MANOUVRES_FACTOR = 0.3
+ALIGNMENT_TRANSLATION_FACTOR = 0.6
 ALIGNMENT_MAX_DETECTION_FAILURES = 200
 ALIGNMENT_MAX_PROCEDURE_FAILURES = 2
 
+TAKE_OFF_ALTITUDE = 3.0
 async def run():
 
     #Prepare logs
@@ -46,86 +49,13 @@ async def run():
             logging.info("Drone connection estabilished")
             break
 
-    print("Preparing mission")
-    mission_items = []
-    mission_items.append(MissionItem(
-                                    47.3977509,
-                                    8.5456069,
-                                    #Baylands37.4142,
-                                    #Baylands-121.9961,
-                                    3,
-                                    10,
-                                    False,
-                                    float('nan'),
-                                    float('nan'),
-                                    MissionItem.CameraAction.NONE,
-                                    1,
-                                    float('nan'),
-                                    float('nan'),
-                                    float('nan'),
-                                    float('nan'),
-                                    MissionItem.VehicleAction.TAKEOFF))
-    mission_items.append(MissionItem(
-                                    47.398036222362471,
-                                    8.5450146439425509,
-                                    #Baylands37.4142,
-                                    #Baylands-121.9961,
-                                    3,
-                                    10,
-                                    False,
-                                    float('nan'),
-                                    float('nan'),
-                                    MissionItem.CameraAction.NONE,
-                                    1,
-                                    float('nan'),
-                                    float('nan'),
-                                    float('nan'),
-                                    float('nan'),
-                                    MissionItem.VehicleAction.NONE))
-    mission_items.append(MissionItem(
-                                    47.398039859999997,
-                                    8.5455725400000002,
-                                    #Baylands37.4142,
-                                    #Baylands-121.9951,
-                                    3,
-                                    10,
-                                    False,
-                                    float('nan'),
-                                    float('nan'),
-                                    MissionItem.CameraAction.NONE,
-                                    1,
-                                    float('nan'),
-                                    float('nan'),
-                                    float('nan'),
-                                    float('nan'),
-                                    MissionItem.VehicleAction.NONE))
-    mission_items.append(MissionItem(
-                                    47.3977509,
-                                    8.5456069,
-                                    #Baylands37.4142,
-                                    #Baylands-121.9961,
-                                    3,
-                                    10,
-                                    False,
-                                    float('nan'),
-                                    float('nan'),
-                                    MissionItem.CameraAction.NONE,
-                                    1,
-                                    float('nan'),
-                                    float('nan'),
-                                    float('nan'),
-                                    float('nan'),
-                                    MissionItem.VehicleAction.LAND))
 
-    mission_plan = MissionPlan(mission_items)
+    waypoints = [
+        (47.398036222362471, 8.5450146439425509, 3),
+        (47.398039859999997, 8.5455725400000002, 3),
+    ]
+    
 
-    # Tuning parameters
-    await drone.mission.set_return_to_launch_after_mission(True)
-
-    print("-- Uploading mission")
-    await drone.mission.clear_mission()
-    await asyncio.sleep(1)
-    await drone.mission.upload_mission(mission_plan)
 
     print("Waiting for drone to have a global position estimate...")
     async for health in drone.telemetry.health():
@@ -133,20 +63,10 @@ async def run():
             print("-- Global position estimate OK")
             break
 
-    # Start offboard mode
-    print("-- Setting initial setpoint")
-    await drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
-    try:
-        await drone.offboard.start()
-        print("Offboard mode engaged!")
-    except OffboardError as error:
-        print(f"Starting offboard mode failed with error code:"
-            f" {error._result.result}")
-        return
 
     video = Video()
 
-    # intrinsic matrix of the simulated camera, set with a resolution of 640 × 1232
+    # intrinsic matrix of the simulated camera, set with a resolution of 1280 × 960
     mtx = np.array([[539.936368, 0, 640.0],
                     [0, 539.936368, 480.0],
                     [0, 0, 1]])
@@ -154,48 +74,47 @@ async def run():
 
     #Preparing Aruco detector
     detector = buildArucoDetector()
-
     print("-- Arming")
     logging.info("Arming and taking off")
     await drone.action.arm()
     await asyncio.sleep(1)
-    await drone.action.takeoff()
-    await asyncio.sleep(3)
-
-    print("-- Starting mission")
+    await drone.offboard.set_position_ned(PositionNedYaw(
+        0,0,-TAKE_OFF_ALTITUDE,float('nan')
+    ))
     try:
-        await drone.mission.start_mission()
-        print("Mission started!")
-        battery = await fc.get_drone_remaining_battery(drone)
-        logging.info(f"Mission started with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
-    except MissionError as error:
-        print(f"Starting mission failed with error code:"
-            f" {error._result.result}")
+        await drone.offboard.start()
+        print("-- Offboard engaged")
+    except OffboardError as e:
+        print(f"Offboard start failed: {e._result.result}")
+        await drone.action.return_to_launch()
         return
-    
-    for i, item in enumerate(mission_items):
 
-        if item.vehicle_action == MissionItem.VehicleAction.TAKEOFF or item.vehicle_action == MissionItem.VehicleAction.LAND:
-            continue
+    while True:
+        pos = await fc.get_drone_global_position(drone)
+        if fabs(pos.relative_altitude_m - TAKE_OFF_ALTITUDE) <= 0.5:
+            break
 
-        while True:
-            progress = await fc.get_drone_mission_progress(drone)
-            if (progress.current) == i + 1:
-                break
-        
-        print("Checkpoint reached, pausing mission")
-        logging.info(f"Aruco checkpoint reached, pausing mission")
-        await drone.mission.pause_mission()
+    print("-- Starting navigation")
+    battery = await fc.get_drone_remaining_battery(drone)
+    logging.info(f"Mission started with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
+    for (lat, lon, alt) in waypoints:
+        print(f"Flying to waypoint {lat}, {lon}")
+        logging.info(f"Flying to waypoint {lat}, {lon}")
+       
+        await fc.fly_to_global(drone,lat,lon,alt)
+        await asyncio.sleep(1)
+        logging.info("Waypoint reached, starting aruco search")
         
         arucoFound = None
+        
         for s in range(ARUCO_SEARCH_TRIES):
-            arucoFound = await aruco_search(drone, video, detector, mtx, dist, item)
+            arucoFound = await aruco_search(drone, video, detector, mtx, dist)
             if not arucoFound is None:
                 break
 
         if not arucoFound is None:
             print("Aruco located!")
-            result = await align_to_aruco_ned(drone, video, detector, mtx, dist, item)
+            result = await align_to_aruco_ned(drone, video, detector, mtx, dist)
 
             if result is False:
                 print("Aruco alignment failed!")
@@ -203,24 +122,24 @@ async def run():
                 print("Aruco alignment completed!")
                 await asyncio.sleep(3)
 
-            print("Resuming mission")
-            await drone.mission.start_mission()
+            print("Going to next waypoint")
                 
         else:
-            print("Aruco not found, resuming mission")
-            await drone.mission.start_mission()
+            print("Aruco not found, going to next waypoint")
 
     print("Mission completed! Return to home")
     logging.info(f"Mission completed, return to home")
+    await drone.offboard.stop()
     await drone.action.return_to_launch()
 
-async def aruco_search(drone: System, video: Video, detector: aruco.ArucoDetector, mtx, dist, item: MissionItem):
+async def aruco_search(drone: System, video: Video, detector: aruco.ArucoDetector, mtx, dist):
     print("Starting aruco search")
     battery = await fc.get_drone_remaining_battery(drone)
     logging.info(f"Started aruco search with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
     round = 1
     initial_altitude = await fc.get_drone_altitude(drone)
-
+    center_ned = await fc.get_drone_ned_position(drone)
+    heading = await fc.get_drone_heading(drone)
     while round < ARUCO_SEARCH_ROUNDS:
 
         arucoFound = utilities.look_for_aruco(video, detector, mtx, dist)
@@ -230,44 +149,29 @@ async def aruco_search(drone: System, video: Video, detector: aruco.ArucoDetecto
         radius = ARUCO_SEARCH_RADIUS_MULTIPLIER * round
 
         print("Starting orbit")
-        await drone.action.do_orbit(radius,
-                                    1,
-                                    OrbitYawBehavior.HOLD_INITIAL_HEADING,
-                                    item.latitude_deg,
-                                    item.longitude_deg,
-                                    initial_altitude)
         
-        target_time = time.time() + ARUCO_SEARCH_STOP_ADDED_TIME * round
-
-        while time.time() < target_time:
-            arucoFound = utilities.look_for_aruco(video, detector, mtx, dist)
-            # Double check to avoid problems due to camera angle
-            if not arucoFound is None:
-                print("Spotted marker")
-                await drone.action.hold()
-                target_time = target_time + ARUCO_SEARCH_SPOTTED_ADDED_TIME
-                await asyncio.sleep(2)
-
-                arucoFound = utilities.look_for_aruco(video, detector, mtx, dist)
-                if not arucoFound is None:
-                    return arucoFound
-                else:
-                    await drone.action.do_orbit(radius,
-                                    1,
-                                    OrbitYawBehavior.HOLD_INITIAL_HEADING,
-                                    item.latitude_deg,
-                                    item.longitude_deg,
-                                    initial_altitude)
-                    continue
+        result = await utilities.look_for_aruco_orbit(
+            drone, video, detector, mtx, dist,
+            center_ned, heading, radius, 1,
+        )
+        if result is not None:
+            return result
         round += 1
-
-    await drone.action.goto_location(item.latitude_deg, item.longitude_deg, initial_altitude, item.yaw_deg)
+   
+    center_ned_yaw = PositionNedYaw(
+        center_ned.north_m,
+        center_ned.east_m,
+        center_ned.down_m,
+        heading
+    )
+    await fc.fly_to_ned(drone, center_ned_yaw, 0.5)
     print("Aruco search failed, awaiting the drone to navigate to the initial position")
     await asyncio.sleep(5)
     return None
 
 
-async def align_to_aruco_ned(drone: System, video: Video, detector: aruco.ArucoDetector, mtx, dist, item: MissionItem):
+# TO-DO, update target position in a loop of aruco detection.
+async def align_to_aruco_ned_smooth(drone: System, video: Video, detector: aruco.ArucoDetector, mtx, dist):
     print("Starting NED alignment procedure")
     battery = await fc.get_drone_remaining_battery(drone)
     logging.info(f"Started NED aruco alignment with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
@@ -280,20 +184,48 @@ async def align_to_aruco_ned(drone: System, video: Video, detector: aruco.ArucoD
     initial_heading = await fc.get_drone_heading(drone)
     heading = initial_heading
 
-    # Prepare a setpoint before activating offboard mode
-    await drone.offboard.set_position_ned(PositionNedYaw(
-        initial_ned_position.north_m,
-        initial_ned_position.east_m,
-        initial_ned_position.down_m,
-        initial_heading
-    ))
+    aruco_distances = utilities.get_aruco_distances_and_yaw(video, detector, mtx, dist)
 
-    try:
-        await drone.offboard.start()
-        print("Offboard mode engaged for alignment!")
-    except OffboardError as error:
-        print(f"Starting offboard mode failed: {error._result.result}")
-        return False
+    # --- Marker detected ---
+
+    target_ned = await utilities.calculate_target_ned_position(drone, aruco_distances)
+    
+    vertical_delta = aruco_distances[2] - ALIGNMENT_TARGET_ALTITUDE
+
+    current_ned = await fc.get_drone_ned_position(drone)
+    target_ned.down_m = current_ned.down_m + vertical_delta
+    await fc.fly_to_ned_smooth(drone,target_ned)
+    
+    # Hold in place: send current NED position as setpoint
+   
+    await asyncio.sleep(3)
+
+    # Climb back to initial altitude before resuming mission
+    await drone.offboard.set_position_ned(PositionNedYaw(
+        target_ned.north_m,
+        target_ned.east_m,
+        initial_ned_position.down_m,
+        heading
+    ))
+    await asyncio.sleep(7)
+    return True
+
+
+
+async def align_to_aruco_ned(drone: System, video: Video, detector: aruco.ArucoDetector, mtx, dist):
+    print("Starting NED alignment procedure")
+    battery = await fc.get_drone_remaining_battery(drone)
+    logging.info(f"Started NED aruco alignment with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
+
+    aruco_detection_failures = 0
+    procedure_failures = 0
+    lined_up = False
+
+    initial_ned_position = await fc.get_drone_ned_position(drone)
+    initial_heading = await fc.get_drone_heading(drone)
+    heading = initial_heading
+
+
     
     while True:
         aruco_distances = utilities.get_aruco_distances_and_yaw(video, detector, mtx, dist)
@@ -318,7 +250,6 @@ async def align_to_aruco_ned(drone: System, video: Video, detector: aruco.ArucoD
                     await asyncio.sleep(10)
                 else:
                     print("Aruco detection failed multiple times, aborting alignment")
-                    await drone.offboard.stop()
                     return False
             continue
 
@@ -330,7 +261,10 @@ async def align_to_aruco_ned(drone: System, video: Video, detector: aruco.ArucoD
         vertical_delta = aruco_distances[2] - ALIGNMENT_TARGET_ALTITUDE
 
         current_ned = await fc.get_drone_ned_position(drone)
-
+        delta_north = target_ned.north_m - current_ned.north_m
+        delta_east = target_ned.east_m - current_ned.east_m
+        target_ned.north_m = current_ned.north_m + (delta_north * ALIGNMENT_TRANSLATION_FACTOR)
+        target_ned.east_m = current_ned.east_m + (delta_east * ALIGNMENT_TRANSLATION_FACTOR)
         if fabs(aruco_distances[0]) < ALIGNMENT_LINEUP_DISTANCE and fabs(aruco_distances[1]) < ALIGNMENT_LINEUP_DISTANCE:
             lined_up = True
 
@@ -372,7 +306,6 @@ async def align_to_aruco_ned(drone: System, video: Video, detector: aruco.ArucoD
                 heading
             ))
             await asyncio.sleep(7)
-            await drone.offboard.stop()
             return True
 
         await drone.offboard.set_position_ned(target_ned)
