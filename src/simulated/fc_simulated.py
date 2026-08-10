@@ -1,10 +1,12 @@
 from mavsdk import System
-from mavsdk.telemetry import Position, PositionNed, FlightMode, Battery, PositionVelocityNed
+from mavsdk.telemetry import Position, PositionNed, FlightMode, Battery, PositionVelocityNed, EulerAngle
 from mavsdk.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed, VelocityBodyYawspeed, PositionGlobalYaw
 from mavsdk.mission import MissionItem, MissionProgress
 from math import radians, cos, fabs, sqrt
+
+import numpy as np
 import ruckig
-#from ruckig import Ruckig, InputParameter, OutputParameter, Result
+import time
 import asyncio
 
 async def get_drone_home_position(drone: System) -> Position:
@@ -30,6 +32,16 @@ async def get_drone_altitude(drone: System) -> float:
 async def get_drone_heading(drone: System) -> float:
     async for heading in drone.telemetry.heading():
         return heading.heading_deg
+
+async def get_drone_attitude_euler(drone: System):
+    """Return the latest roll/pitch/yaw telemetry sample in degrees."""
+    async for attitude in drone.telemetry.attitude_euler():
+        return attitude
+
+async def get_drone_attitude_euler(drone: System) -> EulerAngle:
+    """Return the latest body attitude (roll, pitch, yaw) from telemetry."""
+    async for attitude in drone.telemetry.attitude_euler():
+        return attitude
     
 async def get_drone_flight_mode(drone: System) -> FlightMode:
     async for mode in drone.telemetry.flight_mode():
@@ -146,7 +158,7 @@ def horizontal_distance(lat1, lon1, lat2, lon2):
     a = dlat**2 + (cos(radians(lat1)) * dlon)**2
     return R * sqrt(a)
 
-async def fly_to_global(drone : System, target_lat, target_lon, target_alt, threshold=0.5):
+async def fly_to_global(drone : System, target_lat, target_lon, target_alt, heading = float('nan') ,threshold=0.5):
     STEP_FACTOR = 0.6
 
     while True:
@@ -169,7 +181,7 @@ async def fly_to_global(drone : System, target_lat, target_lon, target_alt, thre
                 interp_lat,
                 interp_lon,
                 target_alt,
-                float('nan'),
+                heading,
                 PositionGlobalYaw.AltitudeType.REL_HOME
             )
         )
@@ -179,14 +191,14 @@ async def fly_to_ned_smooth(drone: System,
                             target: PositionNedYaw,
                             threshold: float = 0.3):
     LOOP_RATE = 0.01
-    MAX_VELOCITY     = 10.0   # MPC_XY_CRUISE  (m/s)
+    MAX_VELOCITY     = 3.0   # MPC_XY_CRUISE  (m/s)
     MAX_ACCELERATION = 3.0   # MPC_ACC_HOR    (m/s²)
-    MAX_JERK         = 4.0   # MPC_JERK_MAX   (m/s³)
+    MAX_JERK         = 2   # MPC_JERK_MAX   (m/s³)
 
-    otg = ruckig.Ruckig(3, LOOP_RATE)
+    otg = ruckig.Ruckig(3)
+    traj = ruckig.Trajectory(3)
     inp = ruckig.InputParameter(3)
-    out = ruckig.OutputParameter(3)
-    pos =await get_drone_ned_position(drone)
+    pos = await get_drone_ned_position(drone)
     inp.current_position = [pos.north_m, pos.east_m, pos.down_m]
     inp.current_velocity = [0.0, 0.0, 0.0]
     inp.current_acceleration = [0.0, 0.0, 0.0]
@@ -196,19 +208,152 @@ async def fly_to_ned_smooth(drone: System,
     inp.max_velocity        = [MAX_VELOCITY] * 3
     inp.max_acceleration    = [MAX_ACCELERATION] * 3
     inp.max_jerk            = [MAX_JERK] * 3
-    res = ruckig.Result.Working
-    while  res == ruckig.Result.Working:
-        res = otg.update(inp, out)
+    t1 = time.perf_counter()
+    otg.calculate(inp, traj)
+    t2 = time.perf_counter()
+    print(t2-t1)
+    start_time = time.perf_counter()
+    
+    while True:
 
-        p = out.new_position
-        v = out.new_velocity
-        a = out.new_acceleration
-        await drone.offboard.set_position_ned(PositionNedYaw(p[0], p[1], p[2], target.yaw_deg))
-        """await drone.offboard.set_position_velocity_acceleration_ned(
+        current_time = time.perf_counter()
+        t = current_time - start_time
+
+
+        p, v, a  = traj.at_time(t)
+        #await drone.offboard.set_position_ned(PositionNedYaw(p[0], p[1], p[2], target.yaw_deg))
+        await drone.offboard.set_position_velocity_acceleration_ned(
             PositionNedYaw(p[0], p[1], p[2], target.yaw_deg),
             VelocityNedYaw(v[0], v[1], v[2], target.yaw_deg),
             AccelerationNed(a[0], a[1], a[2])
-        )"""
+        )
+        
+        if t >= traj.duration:
+            print("Trajectory successfully completed!")
+            break
 
-        out.pass_to_input(inp)
-        await asyncio.sleep(LOOP_RATE)
+async def fly_to_ned_recomp(drone: System,
+                            target: PositionNedYaw,
+                            threshold: float = 0.3):
+    
+    def _trajectory(position, velocity, acceleration, target,
+                max_xy_velocity, max_down_velocity, max_climb_velocity,
+                max_xy_acceleration, max_z_acceleration, max_jerk):
+        inp = ruckig.InputParameter(3)
+        traj = ruckig.Trajectory(3)
+
+        inp.current_position = position.tolist()
+        inp.current_velocity = velocity.tolist()
+        inp.current_acceleration = acceleration.tolist()
+        inp.target_position     = [target.north_m, target.east_m, target.down_m]
+        inp.target_velocity = [0.0, 0.0, 0.0]
+        inp.target_acceleration = [0.0, 0.0, 0.0]
+
+        xy_v = np.maximum(max_xy_velocity, np.abs(velocity[:2]) + 1e-3)
+        xy_a = np.maximum(max_xy_acceleration, np.abs(acceleration[:2]) + 1e-3)
+        down_v = max(max_down_velocity, max(0.0, velocity[2]) + 1e-3)
+        z_a = max(max_z_acceleration, abs(acceleration[2]) + 1e-3)
+
+        inp.max_velocity = [float(xy_v[0]), float(xy_v[1]), float(down_v)]
+        inp.min_velocity = [
+            -float(max_xy_velocity),
+            -float(max_xy_velocity),
+            -float(max_climb_velocity),
+        ]
+        inp.max_acceleration = [float(xy_a[0]), float(xy_a[1]), float(z_a)]
+        inp.max_jerk = [float(max_jerk)] * 3
+
+        inp.synchronization = ruckig.Synchronization.Time
+        inp.per_dof_synchronization = [
+            ruckig.Synchronization.Phase,
+            ruckig.Synchronization.Phase,
+            ruckig.Synchronization.No,
+        ]
+
+        result = ruckig.Ruckig(3).calculate(inp, traj)
+        if result in (ruckig.Result.Working, ruckig.Result.Finished):
+            return traj
+        return None
+    last_acceleration = np.array([0.0, 0.0, 0.0])
+    while True:
+
+        pv = await get_drone_ned_position_velocity(drone)
+
+        position_ned = np.array([
+            pv.position.north_m, pv.position.east_m, pv.position.down_m,
+        ])
+        velocity_ned = np.array([
+            pv.velocity.north_m_s,
+            pv.velocity.east_m_s,
+            pv.velocity.down_m_s,
+        ])
+        traj = _trajectory(
+            position_ned, velocity_ned, last_acceleration, target,
+            3, 3,
+            3, 3,
+            3, 2,
+        )
+        p, v, a  = traj.at_time(0.05)
+        last_acceleration = np.array(a)
+        #await drone.offboard.set_position_ned(PositionNedYaw(p[0], p[1], p[2], target.yaw_deg))
+        await drone.offboard.set_position_velocity_acceleration_ned(
+            PositionNedYaw(p[0], p[1], p[2], target.yaw_deg),
+            VelocityNedYaw(v[0], v[1], v[2], target.yaw_deg),
+            AccelerationNed(a[0], a[1], a[2])
+        )
+        target_np = np.array([target.north_m, target.east_m, target.down_m])
+        error = target_np - position_ned
+        if (
+            np.max(np.abs(error)) <= 0.15
+            and np.linalg.norm(velocity_ned) <= 0.10
+        ):
+            await drone.offboard.set_position_ned(PositionNedYaw(
+                float(position_ned[0]), float(position_ned[1]),
+                float(position_ned[2]), float("nan"),
+            ))
+            return True
+
+
+def make_position_smoother(trajectory, max_lag=0.25):
+    """
+    Returns a function:
+        position_sp, velocity_sp, acceleration_sp = follower(current_position)
+
+    The virtual trajectory clock slows when the drone falls behind.
+    """
+
+    virtual_time = 0.0
+    last_time = time.perf_counter()
+
+    start = np.asarray(trajectory.at_time(0.0)[0])
+    end = np.asarray(trajectory.at_time(trajectory.duration)[0])
+    direction = end - start
+    direction /= max(np.linalg.norm(direction), 1e-6)
+
+    def follower(current_position):
+        nonlocal virtual_time, last_time
+
+        now = time.perf_counter()
+        dt = now - last_time
+        last_time = now
+
+        position, velocity, acceleration = trajectory.at_time(virtual_time)
+        position = np.asarray(position)
+
+        # Positive if the reference is ahead of the drone.
+        lag = np.dot(
+            position - np.asarray(current_position),
+            direction,
+        )
+
+        # PX4-like trajectory time stretching.
+        rate = 1.0 - np.clip(lag / max_lag, 0.0, 1.0)
+        if rate < 1: print(f"Trajectory follower lag: {lag:.3f} m, rate: {rate:.3f}")
+        virtual_time = min(
+            virtual_time + dt * rate,
+            trajectory.duration,
+        )
+
+        return trajectory.at_time(virtual_time)
+
+    return follower

@@ -58,21 +58,45 @@ async def get_position_corrections(
 
     return [current_forward_correction, current_right_correction, forward_wind_speed, right_wind_speed]
 
-def get_aruco_distances_and_yaw(video: Video, detector, mtx, dist) -> list[float]:
+def get_aruco_distances_and_yaw(rvecs, tvecs) -> list[float] | None:
+    """Convert an already-computed marker pose to the aligned distances.
+
+    This function performs no image acquisition and no ArUco detection. Pass
+    it the ``rvecs`` and ``tvecs`` returned by
+    ``camera_simulated.my_estimatePoseSingleMarkers`` so corners, pose, and
+    FOV measurements all come from the same frame.
+    """
+    if rvecs is None or tvecs is None or len(rvecs) == 0 or len(tvecs) == 0:
+        return None
+
+    rvec = np.asarray(rvecs[0], dtype=float).reshape(3)
+    tvec = np.asarray(tvecs[0], dtype=float).reshape(3)
+
+    forward_distance = -float(tvec[1])
+    right_distance = float(tvec[0])
+    vertical_distance = float(tvec[2])
+    yaw_difference = normalize_heading(degrees(float(rvec[2])))
+
+    return [
+        forward_distance,
+        right_distance,
+        vertical_distance,
+        yaw_difference,
+    ]
+
+
+def detect_aruco_distances_and_yaw(video: Video, detector, mtx, dist):
+    """Legacy convenience wrapper for older alignment/search functions.
+
+    New code should detect once and call ``get_aruco_distances_and_yaw`` with
+    the returned pose. This wrapper is kept only so unrelated old project
+    functions can still use their previous video-based behavior.
+    """
     aruco_result = checkArucoPresence(video, detector, mtx, dist)
     if aruco_result is None:
         return None
-    else:
-        tvecs = aruco_result[1]
-        rvecs = aruco_result[0]
-
-        forward_distance = - tvecs[0][1][0]
-        right_distance = tvecs[0][0][0]
-        vertical_distance = tvecs[0][2][0]
-
-        yaw_difference = normalize_heading(degrees(rvecs[0][2][0]))
-
-        return [forward_distance, right_distance, vertical_distance, yaw_difference]
+    rvecs, tvecs, _ = aruco_result
+    return get_aruco_distances_and_yaw(rvecs, tvecs)
 
 
 async def calculate_target_ned_position(drone: System, aruco_distances: list[float]) -> PositionNedYaw:
@@ -199,7 +223,7 @@ async def look_for_aruco_orbit(drone : System, video : Video, detector, mtx, dis
             AccelerationNed(an, ae, 0.0)
         )
 
-        result = get_aruco_distances_and_yaw(video, detector, mtx, dist)
+        result = detect_aruco_distances_and_yaw(video, detector, mtx, dist)
         if result is not None:
             target_ned = await calculate_target_ned_position(drone,result)
 

@@ -11,8 +11,25 @@ import numpy as np
 import cv2.aruco as aruco
 
 from camera_simulated import Video
+#from mpc import ArucoTrackingMPC, align_to_aruco_mpc
+from mpc_traj import CasadiArucoTrajectoryPlanner, align_to_aruco_casadi
+from alignments import align_to_aruco_visual_hybrid
+from sync_alignment import align_to_aruco_ruckig_adaptive
 import utilities_simulated as utilities
 import fc_simulated as fc
+import threading
+import cv2
+def display_thread_fn(video: Video, stop_event: threading.Event):
+    while not stop_event.is_set():
+        if video.frame_available():
+            frame = video.frame().copy()
+            cv2.imshow("Drone View", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                stop_event.set()
+                break
+        else:
+            time.sleep(0.01)
+    cv2.destroyAllWindows()
 
 #Defining constants
 ARUCO_SEARCH_ROUNDS = 3
@@ -66,6 +83,15 @@ async def run():
 
     video = Video()
 
+    stop_display = threading.Event()
+    display_thread = threading.Thread(
+        target=display_thread_fn,
+        args=(video, stop_display),
+        daemon=True  # dies automatically if main program exits
+    )
+    display_thread.start()
+
+
     # intrinsic matrix of the simulated camera, set with a resolution of 1280 × 960
     mtx = np.array([[539.936368, 0, 640.0],
                     [0, 539.936368, 480.0],
@@ -101,7 +127,7 @@ async def run():
         print(f"Flying to waypoint {lat}, {lon}")
         logging.info(f"Flying to waypoint {lat}, {lon}")
        
-        await fc.fly_to_global(drone,lat,lon,alt)
+        await fc.fly_to_global(drone,lat,lon,alt,heading = 97)
         await asyncio.sleep(1)
         logging.info("Waypoint reached, starting aruco search")
         
@@ -114,7 +140,7 @@ async def run():
 
         if not arucoFound is None:
             print("Aruco located!")
-            result = await align_to_aruco_ned(drone, video, detector, mtx, dist)
+            result = await align_visual(drone, video, detector, mtx, dist)
 
             if result is False:
                 print("Aruco alignment failed!")
@@ -169,6 +195,57 @@ async def aruco_search(drone: System, video: Video, detector: aruco.ArucoDetecto
     await asyncio.sleep(5)
     return None
 
+async def align_mpc_traj(drone,video,detector,mtx,dist):
+    planner = CasadiArucoTrajectoryPlanner(
+    mtx=mtx,
+    frame_width=1280,
+    frame_height=960,
+    intervals=40,
+    minimum_duration=1.0,
+    maximum_duration=12.0,
+
+    max_velocity=(3.0, 3.0, 1.5),
+    min_velocity=(-3.0, -3.0, -1.0),
+    max_acceleration=(3.0, 3.0, 2.0),
+    min_acceleration=(-3.0, -3.0, -2.0),
+    max_jerk=(2.0, 2.0, 2.0),
+
+    robust_margin_px=60.0,
+    margin_ramp_fraction=0.30,
+
+    time_weight=10.0,
+    jerk_weight=0.01,
+    acceleration_weight=0.002,
+    image_centre_weight=1.0,
+)
+    await asyncio.sleep(5)
+    success = await align_to_aruco_casadi(
+        drone,
+        video,
+        detector,
+        mtx,
+        dist,
+        planner,
+        marker_size=0.5,
+        target_altitude=1.0,
+        initial_acceleration_ned=(0.0, 0.0, 0.0),
+    )
+async def align_sync(drone,video,detector,mtx,dist):
+    success = await align_to_aruco_ruckig_adaptive(drone,video,detector,mtx,dist,
+        fx=mtx[0, 0], fy=mtx[1, 1],
+        frame_width=1280, frame_height=960,
+    )    
+    print("Alignment succeeded" if success else "Alignment failed")
+    await asyncio.sleep(5)
+
+async def align_visual(drone,video,detector,mtx,dist):
+    #await asyncio.sleep(5)
+    success = await align_to_aruco_visual_hybrid(drone,video,detector,mtx,dist,
+        fx=mtx[0, 0], fy=mtx[1, 1],
+        frame_width=1280, frame_height=960,
+    )    
+    print("Alignment succeeded" if success else "Alignment failed")
+    await asyncio.sleep(5)
 
 # TO-DO, update target position in a loop of aruco detection.
 async def align_to_aruco_ned_smooth(drone: System, video: Video, detector: aruco.ArucoDetector, mtx, dist):
@@ -184,7 +261,7 @@ async def align_to_aruco_ned_smooth(drone: System, video: Video, detector: aruco
     initial_heading = await fc.get_drone_heading(drone)
     heading = initial_heading
 
-    aruco_distances = utilities.get_aruco_distances_and_yaw(video, detector, mtx, dist)
+    aruco_distances = utilities.detect_aruco_distances_and_yaw(video, detector, mtx, dist)
 
     # --- Marker detected ---
 
@@ -228,7 +305,7 @@ async def align_to_aruco_ned(drone: System, video: Video, detector: aruco.ArucoD
 
     
     while True:
-        aruco_distances = utilities.get_aruco_distances_and_yaw(video, detector, mtx, dist)
+        aruco_distances = utilities.detect_aruco_distances_and_yaw(video, detector, mtx, dist)
 
         # --- Detection failure handling ---
         if aruco_distances is None:
@@ -322,7 +399,7 @@ async def align_to_aruco(drone: System, video: Video, detector: aruco.ArucoDetec
     initial_heading = heading
 
     while True:
-        aruco_distances = utilities.get_aruco_distances_and_yaw(video, detector, mtx, dist)
+        aruco_distances = utilities.detect_aruco_distances_and_yaw(video, detector, mtx, dist)
         if aruco_distances is None:
             aruco_detection_failures += 1
             print(f"Aruco not found for {aruco_detection_failures} times")
