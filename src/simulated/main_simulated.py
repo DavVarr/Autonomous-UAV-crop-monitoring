@@ -140,7 +140,7 @@ async def run():
 
         if not arucoFound is None:
             print("Aruco located!")
-            result = await align_visual(drone, video, detector, mtx, dist)
+            result = await align_sync(drone, video, detector, mtx, dist)
 
             if result is False:
                 print("Aruco alignment failed!")
