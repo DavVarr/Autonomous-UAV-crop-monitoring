@@ -33,10 +33,13 @@ def _body_to_ned(attitude):
 def _virtual_corners(corners, mtx, attitude):
     yaw = radians(attitude.yaw_deg)
     level_to_ned = np.array([
-        [cos(yaw), -sin(yaw), 0.], [sin(yaw), cos(yaw), 0.], [0., 0., 1.]
+        [cos(yaw), -sin(yaw), 0.],
+        [sin(yaw),  cos(yaw), 0.],
+        [0., 0., 1.],
     ])
     R = CAMERA_TO_BODY.T @ level_to_ned.T @ _body_to_ned(attitude) @ CAMERA_TO_BODY
-    q = (mtx @ R @ np.linalg.inv(mtx) @ np.column_stack((corners, np.ones(4))).T).T
+    H = mtx @ R @ np.linalg.inv(mtx)
+    q = (H @ np.column_stack((corners, np.ones(4))).T).T
     return None if np.any(q[:, 2] <= 1e-6) else q[:, :2] / q[:, 2, None]
 
 
@@ -58,18 +61,48 @@ def _observe(frame, detector, mtx, dist, marker_size, marker_id, attitude, headi
     rvecs, tvecs, _ = my_estimatePoseSingleMarkers([corner], marker_size, mtx, dist)
     rvec, tvec = np.asarray(rvecs[0]).ravel(), np.asarray(tvecs[0]).ravel()
     h = marker_size / 2
-    object_corners = np.array([[-h, -h, 0.], [h, -h, 0.], [h, h, 0.], [-h, h, 0.]])
+    marker_corners = np.array([[-h, -h, 0.], [h, -h, 0.], [h, h, 0.], [-h, h, 0.]])
     R_marker, _ = cv2.Rodrigues(rvec)
-    corners_camera = object_corners @ R_marker.T + tvec
+    corners_camera = marker_corners @ R_marker.T + tvec
     corners_ned = (_body_to_ned(attitude) @ CAMERA_TO_BODY @ corners_camera.T).T
     corners_aligned = np.array([_rotate_frame(c, heading) for c in corners_ned])
     return virtual, corners_aligned.mean(axis=0), corners_aligned
 
 
-def _phase1_acceleration_limits(corners, fx, fy, width, height, reserve, minimum, maximum):
-    center = np.array([width, height]) / 2
-    available = np.maximum(0., center - reserve - np.max(np.abs(corners - center), axis=0))
-    return np.clip(G * available[::-1] / [fy, fx], minimum, maximum)
+def _phase1_acceleration_limits(corners, direction, mtx, width, height,
+                                reserve, minimum, maximum):
+    direction = np.asarray(direction, float)
+    norm = np.linalg.norm(direction)
+    if norm < 1e-6:
+        return np.full(2, minimum)
+    direction /= norm
+
+    fx, fy, cx, cy = mtx[0, 0], mtx[1, 1], mtx[0, 2], mtx[1, 2]
+    x, y = (corners[:, 0] - cx) / fx, (corners[:, 1] - cy) / fy
+    dx, dy = direction
+
+    rate = np.column_stack((
+        fx * ((1 + x*x) * dy - x*y * dx),
+        fy * (x*y * dy - (1 + y*y) * dx),
+    )) / G
+
+    lower = corners - reserve
+    upper = [width - reserve, height - reserve] - corners
+
+    # Already inside the reserve: analytically find the first boundary hit.
+    if np.all(lower >= 0) and np.all(upper >= 0):
+        margin = np.where(rate >= 0, upper, lower)
+        bounds = np.divide(
+            margin, np.abs(rate),
+            out=np.full_like(rate, np.inf),
+            where=np.abs(rate) > 1e-9,
+        )
+        magnitude = np.clip(bounds.min(), minimum, maximum)
+    else:
+        # Reserve is soft: still move slowly toward the marker.
+        magnitude = minimum
+
+    return np.abs(direction) * magnitude
 
 
 def _make_trajectory(position, velocity, acceleration, target,
@@ -89,7 +122,7 @@ def _make_trajectory(position, velocity, acceleration, target,
 
 
 def _body_to_aligned(acceleration):
-    down = np.array([-acceleration[0], -acceleration[1], G - acceleration[2]])
+    down = np.array([-acceleration[0], -acceleration[1], G])
     down /= np.linalg.norm(down)
     right = np.cross(down, [1., 0., 0.])
     if np.linalg.norm(right) < 1e-6:
@@ -98,18 +131,21 @@ def _body_to_aligned(acceleration):
     return np.column_stack((np.cross(right, down), right, down))
 
 
+def _project(corners, position, acceleration, mtx):
+    R = _body_to_aligned(acceleration)
+    if R is None:
+        return None
+    camera = (CAMERA_TO_BODY.T @ R.T @ (corners - position).T).T
+    if np.any(camera[:, 2] <= 1e-6):
+        return None
+    return camera[:, :2] / camera[:, 2, None] * [mtx[0, 0], mtx[1, 1]] + mtx[:2, 2]
+
+
 def _trajectory_safe(trajectory, marker_corners, mtx, width, height, dt):
-    focal, center = np.array([mtx[0, 0], mtx[1, 1]]), mtx[:2, 2]
     for t in np.r_[np.arange(dt, trajectory.duration, dt), trajectory.duration]:
         p, _, a = map(np.asarray, trajectory.at_time(float(t)))
-        R = _body_to_aligned(a)
-        if R is None:
-            return False
-        camera = (CAMERA_TO_BODY.T @ R.T @ (marker_corners - p).T).T
-        if np.any(camera[:, 2] <= 1e-6):
-            return False
-        pixels = camera[:, :2] / camera[:, 2, None] * focal + center
-        if np.any(pixels < 0) or np.any(pixels > [width, height]):
+        pixels = _project(marker_corners, p, a, mtx)
+        if pixels is None or np.any(pixels < 0) or np.any(pixels > [width, height]):
             return False
     return True
 
@@ -128,12 +164,7 @@ async def align_to_aruco_ruckig_adaptive(
     altitude_hold = (await fc.get_drone_ned_position_velocity(drone)).position.down_m
     phase1_trajectory = phase1_start = None
     marker_world = marker_corners_world = loss_start = None
-    nan = float("nan")#reset vel integrator
-    """await drone.offboard.set_position_velocity_acceleration_ned(
-            PositionNedYaw(nan, nan, altitude_hold, heading),
-            VelocityNedYaw(nan, nan, nan, heading),
-            AccelerationNed(0.0, 0.0, nan),
-        )"""
+
     while True:
         pv = await fc.get_drone_ned_position_velocity(drone)
         attitude = await fc.get_drone_attitude_euler(drone)
@@ -175,30 +206,28 @@ async def align_to_aruco_ruckig_adaptive(
         ):
             break
 
-        limits = _phase1_acceleration_limits(
-            virtual_corners, fx, fy, frame_width, frame_height, fov_margin,
-            phase1_minimum_acceleration, phase1_maximum_acceleration,
-        )
         if phase1_trajectory is None:
             p_ref, v_ref, a_ref = position[:2], np.zeros(2), np.zeros(2)
-        else:
-            limits = np.maximum(limits, np.abs(a_ref))
+
+        limits = _phase1_acceleration_limits(
+            virtual_corners, marker_world[:2] - p_ref, mtx,
+            frame_width, frame_height, fov_margin,
+            phase1_minimum_acceleration, phase1_maximum_acceleration,
+        )
+        limits = np.maximum(limits, np.abs(a_ref))
 
         phase1_trajectory = _make_trajectory(
-            p_ref, v_ref, a_ref, marker_world[:2], maximum_velocity, limits, maximum_jerk*2
+            p_ref, v_ref, a_ref, marker_world[:2], maximum_velocity, limits, maximum_jerk
         )
         if phase1_trajectory is None:
             return False
 
         phase1_start = now
         p, v, a = map(np.asarray, phase1_trajectory.at_time(
-            min(time.perf_counter() - phase1_start, phase1_trajectory.duration)
-        ))
-        
-
+            min(time.perf_counter() - phase1_start, phase1_trajectory.duration)))
         p = _rotate_frame(np.r_[p, altitude_hold], heading, True)
         v, a = (_rotate_frame(np.r_[x, np.nan], heading, True) for x in (v, a))
-        
+
         await drone.offboard.set_position_velocity_acceleration_ned(
             PositionNedYaw(*map(float, p), heading),
             VelocityNedYaw(*map(float, v), heading),
@@ -216,5 +245,4 @@ async def align_to_aruco_ruckig_adaptive(
             AccelerationNed(*map(float, a)),
         )
         if elapsed > trajectory.duration:
-            print("last setpoints:", p, v, a)
             return True
