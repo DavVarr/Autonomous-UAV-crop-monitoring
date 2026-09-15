@@ -108,6 +108,20 @@ async def check_ned_position_reached(drone: System, target_position: PositionNed
     else:
         return False
 
+async def check_ned_position_reached_with_velocity(drone: System, target_position: PositionNedYaw, tolerance: float, velocity_threshold: float):
+    position_velocity = await get_drone_ned_position_velocity(drone)
+    distance_to_target = ((position_velocity.position.north_m - target_position.north_m) ** 2 +
+                            (position_velocity.position.east_m - target_position.east_m) ** 2 +
+                            (position_velocity.position.down_m - target_position.down_m) ** 2) ** 0.5
+    velocity_magnitude = (position_velocity.velocity.north_m_s ** 2 +
+                          position_velocity.velocity.east_m_s ** 2 +
+                          position_velocity.velocity.down_m_s ** 2) ** 0.5
+
+    if distance_to_target < tolerance and velocity_magnitude < velocity_threshold:
+        return True
+    else:
+        return False
+    
 async def set_local_speeds(forward: float, right: float, down: float, yaw: float, drone: System):
     movement = VelocityBodyYawspeed(forward, right, down, yaw)
     await drone.offboard.set_velocity_body(movement)
@@ -158,42 +172,33 @@ def horizontal_distance(lat1, lon1, lat2, lon2):
     a = dlat**2 + (cos(radians(lat1)) * dlon)**2
     return R * sqrt(a)
 
-async def fly_to_global(drone : System, target_lat, target_lon, target_alt, heading = float('nan') ,threshold=0.5):
-    STEP_FACTOR = 0.6
+async def fly_to_global(drone: System,
+                         target_lat, target_lon, target_alt,
+                         heading=float('nan'),
+                         max_velocity=10.0, max_acceleration=3.0, max_jerk=4.0):
+    M_PER_DEG_LAT = 111_320.0
+ 
+    gpos = await get_drone_global_position(drone)
+    pos  = await get_drone_ned_position(drone)
+    m_per_deg_lon = M_PER_DEG_LAT * cos(radians(gpos.latitude_deg))
+ 
+    target = PositionNedYaw(
+        pos.north_m + (target_lat - gpos.latitude_deg) * M_PER_DEG_LAT,
+        pos.east_m  + (target_lon - gpos.longitude_deg) * m_per_deg_lon,
+        pos.down_m  + (gpos.relative_altitude_m - target_alt),   # NED down is positive
+        heading
+    )
+ 
+    await fly_to_ned_smooth(drone, target, threshold=0.2, max_velocity=max_velocity,
+                             max_acceleration=max_acceleration, max_jerk=max_jerk)
+    #await asyncio.sleep(0.5) 
 
-    while True:
-        pos = await get_drone_global_position(drone)
-        
-        dist = horizontal_distance(
-            pos.latitude_deg, pos.longitude_deg,
-            target_lat, target_lon
-        )
-        
-        if dist < threshold:
-            return
-
-        # Intermediate point a fraction of the way toward target
-        interp_lat = pos.latitude_deg + (target_lat - pos.latitude_deg) * STEP_FACTOR
-        interp_lon = pos.longitude_deg + (target_lon - pos.longitude_deg) * STEP_FACTOR
-
-        await drone.offboard.set_position_global(
-            PositionGlobalYaw(
-                interp_lat,
-                interp_lon,
-                target_alt,
-                heading,
-                PositionGlobalYaw.AltitudeType.REL_HOME
-            )
-        )
 
 
 async def fly_to_ned_smooth(drone: System,
                             target: PositionNedYaw,
-                            threshold: float = 0.3):
-    LOOP_RATE = 0.01
-    MAX_VELOCITY     = 3.0   # MPC_XY_CRUISE  (m/s)
-    MAX_ACCELERATION = 3.0   # MPC_ACC_HOR    (m/s²)
-    MAX_JERK         = 2   # MPC_JERK_MAX   (m/s³)
+                            threshold: float = 0.3,
+                            max_velocity=3.0,max_acceleration=3.0,max_jerk=2.0):
 
     otg = ruckig.Ruckig(3)
     traj = ruckig.Trajectory(3)
@@ -205,9 +210,9 @@ async def fly_to_ned_smooth(drone: System,
     inp.target_position     = [target.north_m, target.east_m, target.down_m]
     inp.target_velocity     = [0.0, 0.0, 0.0]
     inp.target_acceleration = [0.0, 0.0, 0.0]
-    inp.max_velocity        = [MAX_VELOCITY] * 3
-    inp.max_acceleration    = [MAX_ACCELERATION] * 3
-    inp.max_jerk            = [MAX_JERK] * 3
+    inp.max_velocity        = [max_velocity] * 3
+    inp.max_acceleration    = [max_acceleration] * 3
+    inp.max_jerk            = [max_jerk] * 3
     t1 = time.perf_counter()
     otg.calculate(inp, traj)
     t2 = time.perf_counter()
@@ -231,7 +236,10 @@ async def fly_to_ned_smooth(drone: System,
         if t >= traj.duration:
             print("Trajectory successfully completed!")
             break
-
+    while True:
+        pos_vel_reached = await check_ned_position_reached_with_velocity(drone, PositionNedYaw(*inp.target_position, float("nan")), tolerance=threshold, velocity_threshold=0.1)
+        if pos_vel_reached:
+            return
 async def fly_to_ned_recomp(drone: System,
                             target: PositionNedYaw,
                             threshold: float = 0.3):
