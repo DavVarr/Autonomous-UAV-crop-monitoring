@@ -19,6 +19,9 @@ import utilities_simulated as utilities
 import fc_simulated as fc
 import threading
 import cv2
+from contextlib import suppress
+
+from VisualOdometry import VisualOdometry
 def display_thread_fn(video: Video, stop_event: threading.Event):
     while not stop_event.is_set():
         if video.frame_available():
@@ -140,14 +143,21 @@ async def run():
 
         if not arucoFound is None:
             print("Aruco located!")
-            result = await align_sync(drone, video, detector, mtx, dist)
+            vision = VisualOdometry(
+                video, detector, mtx, dist, marker_size=0.5, marker_id=None)
+            vision_task = asyncio.create_task(vision.run(drone))
+            try:
+                result = await align_sync(drone, vision)
 
-            if result is False:
-                print("Aruco alignment failed!")
-            else:
-                print("Aruco alignment completed!")
-                await asyncio.sleep(3)
-
+                if result is False:
+                    print("Aruco alignment failed!")
+                else:
+                    print("Aruco alignment completed!")
+                    await asyncio.sleep(3)
+            finally:
+                vision_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await vision_task
             print("Going to next waypoint")
                 
         else:
@@ -230,9 +240,8 @@ async def align_mpc_traj(drone,video,detector,mtx,dist):
         target_altitude=1.0,
         initial_acceleration_ned=(0.0, 0.0, 0.0),
     )
-async def align_sync(drone,video,detector,mtx,dist):
-    success = await align_to_aruco_ruckig_adaptive(drone,video,detector,mtx,dist,
-        fx=mtx[0, 0], fy=mtx[1, 1],
+async def align_sync(drone,vision):
+    success = await align_to_aruco_ruckig_adaptive(drone,vision,
         frame_width=1280, frame_height=960,
     )    
     print("Alignment succeeded" if success else "Alignment failed")
