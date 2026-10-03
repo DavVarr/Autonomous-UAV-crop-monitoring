@@ -20,7 +20,7 @@ import fc_simulated as fc
 import threading
 import cv2
 from contextlib import suppress
-
+from mavsdk.failure import FailureUnit, FailureType
 from VisualOdometry import VisualOdometry
 def display_thread_fn(video: Video, stop_event: threading.Event):
     while not stop_event.is_set():
@@ -146,15 +146,35 @@ async def run():
             vision = VisualOdometry(
                 video, detector, mtx, dist, marker_size=0.5, marker_id=None)
             vision_task = asyncio.create_task(vision.run(drone))
+            gps_failed = False
+            gps_ctrl = await drone.param.get_param_int("EKF2_GPS_CTRL")
             try:
+                await vision.wait_ready()
+
+                print("-- Visual odometry active, disabling GPS")
+                await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
+                """await drone.failure.inject(
+                    FailureUnit.SENSOR_GPS,
+                    FailureType.OFF,
+                    0,
+                )
+                gps_failed = True"""
                 result = await align_sync(drone, vision)
 
                 if result is False:
                     print("Aruco alignment failed!")
                 else:
                     print("Aruco alignment completed!")
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(10)
             finally:
+                if gps_failed:
+                    print("-- Restoring GPS")
+                    await drone.failure.inject(
+                        FailureUnit.SENSOR_GPS,
+                        FailureType.OK,
+                        0,
+                    )
+                await drone.param.set_param_int("EKF2_GPS_CTRL", gps_ctrl)
                 vision_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await vision_task

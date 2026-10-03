@@ -1,18 +1,20 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from math import cos, radians, sin
 
 import cv2
 import numpy as np
-from mavsdk.mocap import (
-    AngularVelocityBody, Covariance, Odometry, PositionBody, Quaternion, SpeedBody,
-)
+from mavsdk.mocap import AngleBody, Covariance, PositionBody, VisionPositionEstimate
 
 import fc_simulated as fc
 from camera_simulated import my_estimatePoseSingleMarkers
 
-CAMERA_TO_BODY = np.array([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])
+
+CAMERA_TO_BODY = np.array([
+    [0., -1., 0.],
+    [1.,  0., 0.],
+    [0.,  0., 1.],
+])
 
 
 @dataclass(slots=True)
@@ -24,122 +26,211 @@ class ArucoObservation:
 
 
 class VisualOdometry:
-    def __init__(self, video, detector, mtx, dist, marker_size=0.5, marker_id=None,
-                 camera_to_body=CAMERA_TO_BODY, camera_position_body=None):
+    _next_reset_counter = 1
+
+    def __init__(
+        self, video, detector, mtx, dist, marker_size=0.5, marker_id=None,
+        camera_to_body=CAMERA_TO_BODY, camera_position_body=None,
+        position_sigma=0.05, attitude_sigma_deg=2.0,
+    ):
         self.video, self.detector = video, detector
-        self.mtx, self.dist = np.asarray(mtx), np.asarray(dist)
-        self.marker_size, self.marker_id = marker_size, marker_id
+        self.mtx, self.dist = np.asarray(mtx, float), np.asarray(dist, float)
+        self.marker_size, self.marker_id = float(marker_size), marker_id
         self.camera_to_body = np.asarray(camera_to_body, float)
-        self.camera_position_body = np.zeros(3) if camera_position_body is None else np.asarray(camera_position_body, float)
-        self._latest = self._R_local_marker = self._p_local_marker = None
+        self.camera_position_body = (
+            np.zeros(3) if camera_position_body is None
+            else np.asarray(camera_position_body, float)
+        )
+
+        self._R_ned_marker = self._p_ned_marker = None
+        self._latest = None
+
+        self._ready = asyncio.Event()
+
+        self._valid = 0
+        self._pose_covariance = _pose_covariance(
+            position_sigma, np.deg2rad(attitude_sigma_deg)
+        )
+
+        self._reset_counter = VisualOdometry._next_reset_counter
+        VisualOdometry._next_reset_counter = (
+            VisualOdometry._next_reset_counter + 1
+        ) & 0xFF
+
+    async def wait_ready(self):
+        await self._ready.wait()
 
     def get_observation(self, max_age=0.15):
         obs = self._latest
-        return obs if obs is not None and time.perf_counter() - obs.timestamp <= max_age else None
+        if obs is None or time.perf_counter() - obs.timestamp > max_age:
+            return None
+        return obs
+
+    @property
+    def marker_position_ned(self):
+        return (
+            None if self._p_ned_marker is None
+            else self._p_ned_marker.copy()
+        )
+
+    @property
+    def marker_corners_ned(self):
+        if self._p_ned_marker is None:
+            return None
+
+        h = self.marker_size / 2
+        corners = np.array([
+            [-h, -h, 0.], [h, -h, 0.],
+            [h, h, 0.], [-h, h, 0.],
+        ])
+        return self._p_ned_marker + (self._R_ned_marker @ corners.T).T
 
     def _detect(self, frame, timestamp):
         corners, ids, _ = self.detector.detectMarkers(frame)
         if ids is None:
             return None
-        ids = np.asarray(ids).ravel()
-        matches = np.arange(len(ids)) if self.marker_id is None else np.flatnonzero(ids == self.marker_id)
-        if not len(matches):
-            return None
 
-        corner = corners[int(matches[0])]
+        ids = np.asarray(ids).ravel()
+        if self.marker_id is None:
+            i = 0
+        else:
+            matches = np.flatnonzero(ids == self.marker_id)
+            if not len(matches):
+                return None
+            i = int(matches[0])
+
+        corner = corners[i]
         rvecs, tvecs, _ = my_estimatePoseSingleMarkers(
-            [corner], self.marker_size, self.mtx, self.dist)
+            [corner], self.marker_size, self.mtx, self.dist
+        )
+
         return ArucoObservation(
             np.asarray(corner).reshape(4, 2).copy(),
             np.asarray(rvecs[0], float).reshape(3),
-            np.asarray(tvecs[0], float).reshape(3), timestamp)
+            np.asarray(tvecs[0], float).reshape(3),
+            timestamp,
+        )
 
     def _body_in_marker(self, obs):
-        R_camera_marker, _ = cv2.Rodrigues(obs.rvec)
-        R_marker_camera = R_camera_marker.T
-        R_camera_body = self.camera_to_body.T
-        R_marker_body = R_marker_camera @ R_camera_body
-        p_marker_camera = -R_marker_camera @ obs.tvec
-        p_marker_body = p_marker_camera - R_marker_body @ self.camera_position_body
-        return p_marker_body, R_marker_body
+        R_cm, _ = cv2.Rodrigues(obs.rvec)
+        R_mc = R_cm.T
+        p_mc = -R_mc @ obs.tvec
+
+        R_mb = R_mc @ self.camera_to_body.T
+        p_mb = p_mc - R_mb @ self.camera_position_body
+        return p_mb, R_mb
 
     async def _initialize_frame(self, drone, obs):
         pv, attitude = await asyncio.gather(
-            fc.get_drone_ned_position_velocity(drone), fc.get_drone_attitude_euler(drone))
-        p_local_body = np.array([
-            pv.position.north_m, pv.position.east_m, pv.position.down_m])
-        R_local_body = _body_to_ned(attitude)
-        p_marker_body, R_marker_body = self._body_in_marker(obs)
+            fc.get_drone_ned_position_velocity(drone),
+            fc.get_drone_attitude_euler(drone),
+        )
 
-        self._R_local_marker = R_local_body @ R_marker_body.T
-        self._p_local_marker = p_local_body - self._R_local_marker @ p_marker_body
+        p_nb = np.array([
+            pv.position.north_m,
+            pv.position.east_m,
+            pv.position.down_m,
+        ])
+        R_nb = _body_to_ned(attitude)
+        p_mb, R_mb = self._body_in_marker(obs)
+
+        # Fixed marker pose in the existing PX4 local-NED frame.
+        self._R_ned_marker = R_nb @ R_mb.T
+        self._p_ned_marker = p_nb - self._R_ned_marker @ p_mb
 
     def _local_body_pose(self, obs):
-        p_marker_body, R_marker_body = self._body_in_marker(obs)
+        p_mb, R_mb = self._body_in_marker(obs)
         return (
-            self._p_local_marker + self._R_local_marker @ p_marker_body,
-            self._R_local_marker @ R_marker_body,
+            self._p_ned_marker + self._R_ned_marker @ p_mb,
+            self._R_ned_marker @ R_mb,
+        )
+
+    def _vpe(self, position, R):
+        roll, pitch, yaw = _euler321(R)
+        return VisionPositionEstimate(
+            0,
+            PositionBody(*map(float, position)),
+            AngleBody(float(roll), float(pitch), float(yaw)),
+            self._pose_covariance,
+            self._reset_counter,
         )
 
     async def run(self, drone):
         last_frame = None
+
         while True:
             frame = self.video.frame()
             if frame is None or frame is last_frame:
-                await asyncio.sleep(0.01)
+                await asyncio.sleep(0.005)
                 continue
 
             last_frame = frame
-            obs = await asyncio.to_thread(self._detect, frame, time.perf_counter())
-            self._latest = obs
+            obs = await asyncio.to_thread(
+                self._detect, frame, time.perf_counter()
+            )
+
             if obs is None:
                 continue
 
-            if self._R_local_marker is None:
+            self._latest = obs
+
+            if self._R_ned_marker is None:
                 await self._initialize_frame(drone, obs)
 
+            self._valid += 1
+            if self._valid >= 10:
+                self._ready.set()
+
+
             position, R = self._local_body_pose(obs)
-            await drone.mocap.set_odometry(_odometry(position, R))
+
+            await drone.mocap.set_vision_position_estimate(
+                self._vpe(position, R)
+            )
 
 
-def _body_to_ned(attitude):
-    r, p, y = map(radians, (attitude.roll_deg, attitude.pitch_deg, attitude.yaw_deg))
-    cr, sr, cp, sp, cy, sy = cos(r), sin(r), cos(p), sin(p), cos(y), sin(y)
+
+def _body_to_ned(a):
+    r, p, y = np.deg2rad([
+        a.roll_deg, a.pitch_deg, a.yaw_deg
+    ])
+    cr, sr, cp, sp, cy, sy = (
+        np.cos(r), np.sin(r), np.cos(p),
+        np.sin(p), np.cos(y), np.sin(y),
+    )
+
     return np.array([
-        [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
-        [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
-        [-sp, sr * cp, cr * cp],
+        [cp*cy, sr*sp*cy - cr*sy, cr*sp*cy + sr*sy],
+        [cp*sy, sr*sp*sy + cr*cy, cr*sp*sy - sr*cy],
+        [-sp,   sr*cp,            cr*cp],
     ])
 
 
-def _quaternion(R):
-    q = np.empty(4)
-    trace = np.trace(R)
-    if trace > 0:
-        s = 2 * np.sqrt(trace + 1)
-        q[:] = [s / 4, (R[2, 1] - R[1, 2]) / s,
-                (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s]
-    else:
-        i = int(np.argmax(np.diag(R)))
-        if i == 0:
-            s = 2 * np.sqrt(1 + R[0, 0] - R[1, 1] - R[2, 2])
-            q[:] = [(R[2, 1] - R[1, 2]) / s, s / 4,
-                    (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s]
-        elif i == 1:
-            s = 2 * np.sqrt(1 + R[1, 1] - R[0, 0] - R[2, 2])
-            q[:] = [(R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s,
-                    s / 4, (R[1, 2] + R[2, 1]) / s]
-        else:
-            s = 2 * np.sqrt(1 + R[2, 2] - R[0, 0] - R[1, 1])
-            q[:] = [(R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s,
-                    (R[1, 2] + R[2, 1]) / s, s / 4]
-    q /= np.linalg.norm(q)
-    return Quaternion(*map(float, q))
+def _euler321(R):
+    pitch = np.arcsin(np.clip(-R[2, 0], -1.0, 1.0))
+    roll = np.arctan2(R[2, 1], R[2, 2])
+    yaw = np.arctan2(R[1, 0], R[0, 0])
+    return roll, pitch, yaw
 
 
-def _odometry(position, R):
-    nan = float("nan")
-    return Odometry(
-        0, Odometry.MavFrame.LOCAL_FRD, PositionBody(*map(float, position)), _quaternion(R),
-        SpeedBody(nan, nan, nan), AngularVelocityBody(nan, nan, nan),
-        Covariance([nan]), Covariance([nan]), 0, Odometry.MavEstimatorType.VISION, 100)
+def _pose_covariance(
+    position_sigma=0.05,
+    attitude_sigma=np.deg2rad(2),
+):
+    ps = (
+        [position_sigma] * 3
+        if np.isscalar(position_sigma) else position_sigma
+    )
+    rs = (
+        [attitude_sigma] * 3
+        if np.isscalar(attitude_sigma) else attitude_sigma
+    )
+
+    cov = [0.0] * 21
+    for i, sigma in zip(
+        (0, 6, 11, 15, 18, 20),
+        [*ps, *rs],
+    ):
+        cov[i] = float(sigma) ** 2
+
+    return Covariance(cov)
