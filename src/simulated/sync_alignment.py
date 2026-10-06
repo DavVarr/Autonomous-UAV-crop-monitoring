@@ -173,11 +173,10 @@ def _wrap_pi(angle):
 
 async def align_to_aruco_ruckig_adaptive(
     drone: System, vision: VisualOdometry,
-    frame_width=1280, frame_height=960, fov_margin=30,
+    frame_width=1280, frame_height=960, fov_margin=30, initial_state = None,
     phase1_minimum_acceleration=0.08, phase1_maximum_acceleration=1.5,
     maximum_velocity=3.0, maximum_acceleration=3.0, maximum_jerk=2.0,
     target_altitude=1.0, marker_loss_timeout=2.0, trajectory_check_dt=0.02,
-    maximum_yaw_velocity=np.deg2rad(35), maximum_yaw_acceleration=np.deg2rad(50), maximum_yaw_jerk=np.deg2rad(100)
 ) -> bool:
     mtx, C = vision.mtx, vision.camera_to_body
     heading = await fc.get_drone_heading(drone)
@@ -192,6 +191,21 @@ async def align_to_aruco_ruckig_adaptive(
     marker_corners_world = np.array([
         _rotate_frame(c, heading) for c in marker_corners_ned
     ])
+
+    if initial_state:
+        handoff_p = _rotate_frame(
+            np.array([initial_state["p"][0], initial_state["p"][1], 0.]),
+            heading
+        )[:2]
+        handoff_v = _rotate_frame(
+            np.array([initial_state["v"][0], initial_state["v"][1], 0.]),
+            heading
+        )[:2]
+        handoff_a = _rotate_frame(
+            np.array([initial_state["a"][0], initial_state["a"][1], 0.]),
+            heading
+        )[:2]
+
 
     loss_start = None
 
@@ -217,7 +231,12 @@ async def align_to_aruco_ruckig_adaptive(
 
         full_target = marker_world - [0., 0., target_altitude]
         if phase1_trajectory is None:
-            full_p, full_v, full_a = position, velocity, np.zeros(3)
+            if initial_state:
+                full_p = np.r_[handoff_p, position[2]]
+                full_v = np.r_[handoff_v, 0.]
+                full_a = np.r_[handoff_a, 0.]
+            else:
+                full_p, full_v, full_a = position, velocity, np.zeros(3)
         else:
             t = min(now - phase1_start, phase1_trajectory.duration)
             p_ref, v_ref, a_ref = map(np.asarray, phase1_trajectory.at_time(t))
@@ -232,7 +251,7 @@ async def align_to_aruco_ruckig_adaptive(
             break
 
         if phase1_trajectory is None:
-            p_ref, v_ref, a_ref = position[:2], np.zeros(2), np.zeros(2)
+            p_ref, v_ref, a_ref = full_p[:2], full_v[:2], full_a[:2]
 
         limits = _phase1_acceleration_limits(
             relative_corners, marker_world[:2] - p_ref, mtx, C,
@@ -308,37 +327,3 @@ async def align_to_aruco_ruckig_adaptive(
 
         if abs(actual_error) < tolerance and abs(error) < tolerance:
             return True
-
-        #await asyncio.sleep(0.02)
-
-        ############ruckig yaw############
-    """marker_forward = marker_corners_ned[0] - marker_corners_ned[3]
-    marker_yaw = np.arctan2(marker_forward[1], marker_forward[0])
-
-    attitude = await fc.get_drone_attitude_euler(drone)
-    current_yaw = np.deg2rad(attitude.yaw_deg)
-    target_yaw = current_yaw + _wrap_pi(marker_yaw - current_yaw)
-
-    yaw_trajectory = _make_trajectory(
-        [current_yaw], [0.], [0.], [target_yaw],
-        maximum_yaw_velocity, maximum_yaw_acceleration, maximum_yaw_jerk,
-    )
-    if yaw_trajectory is None:
-        return False
-
-    final_position = _rotate_frame(full_target, heading, True)
-    start = time.perf_counter()
-
-    while True:
-        elapsed = time.perf_counter() - start
-        yaw, _, _ = yaw_trajectory.at_time(
-            min(elapsed, yaw_trajectory.duration)
-        )
-        yaw_deg = np.degrees(yaw[0])
-
-        await drone.offboard.set_position_ned(
-            PositionNedYaw(*map(float, final_position), yaw_deg)
-        )
-
-        if elapsed > yaw_trajectory.duration:
-            return True"""

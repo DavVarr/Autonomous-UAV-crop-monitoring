@@ -1,3 +1,6 @@
+import asyncio
+import ruckig
+import time
 from mavsdk.telemetry import PositionNed, Position
 from mavsdk.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed
 from camera_simulated import checkArucoPresence, Video
@@ -226,9 +229,55 @@ async def look_for_aruco_orbit(drone : System, video : Video, detector, mtx, dis
         result = detect_aruco_distances_and_yaw(video, detector, mtx, dist)
         if result is not None:
             target_ned = await calculate_target_ned_position(drone,result)
-
-            await drone.offboard.set_position_ned(target_ned)
+            handoff = {}
+            transition_task = asyncio.create_task(_smooth_move_to_target(
+                drone, target_ned, heading, (an, ae), speed,handoff
+            ))
+            transition_task.handoff = handoff
+            transition_task.target_xy = np.array([target_ned.north_m,target_ned.east_m])
             #await asyncio.sleep(0.5)
-            return result
+            return result,transition_task
 
-    return None  # completed full orbit without finding aruco
+    return None, None # completed full orbit without finding aruco
+
+async def _smooth_move_to_target(drone, target, heading, acceleration,
+                                 max_velocity, handoff ,max_acceleration=3, max_jerk=2.0):
+    pv = await fc.get_drone_ned_position_velocity(drone)
+    p0 = np.array([pv.position.north_m, pv.position.east_m])
+    v0 = np.array([pv.velocity.north_m_s, pv.velocity.east_m_s])
+    a0 = np.asarray(acceleration, float)
+    target_xy = np.array([target.north_m, target.east_m])
+
+    inp, trajectory = ruckig.InputParameter(2), ruckig.Trajectory(2)
+    inp.current_position = p0.tolist()
+    inp.current_velocity = v0.tolist()
+    inp.current_acceleration = a0.tolist()
+    inp.target_position = target_xy.tolist()
+    inp.target_velocity = inp.target_acceleration = [0., 0.]
+    inp.max_velocity = [max(max_velocity, abs(v0[0])),
+                        max(max_velocity, abs(v0[1]))]
+    inp.max_acceleration = [max(max_acceleration, abs(a0[0])),
+                            max(max_acceleration, abs(a0[1]))]
+    inp.max_jerk = [max_jerk, max_jerk]
+
+    result = ruckig.Ruckig(2).calculate(inp, trajectory)
+    if result not in (ruckig.Result.Working, ruckig.Result.Finished):
+        return
+    start = time.perf_counter()
+    while True:
+        elapsed = time.perf_counter() - start
+        p, v, a = map(np.asarray, trajectory.at_time(
+            min(elapsed, trajectory.duration)))
+
+        handoff["p"] = p.copy()
+        handoff["v"] = v.copy()
+        handoff["a"] = a.copy()
+        await drone.offboard.set_position_velocity_acceleration_ned(
+            PositionNedYaw(float(p[0]), float(p[1]), target.down_m, heading),
+            VelocityNedYaw(float(v[0]), float(v[1]), 0., heading),
+            AccelerationNed(float(a[0]), float(a[1]), 0.),
+        )
+        if elapsed >= trajectory.duration:
+            return
+        
+
