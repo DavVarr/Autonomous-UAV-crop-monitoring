@@ -161,6 +161,7 @@ async def run():
                         await transition_task
                 print("-- Visual odometry active, disabling GPS")
                 await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
+                vision.enable_fusion()
                 """await drone.failure.inject(
                     FailureUnit.SENSOR_GPS,
                     FailureType.OFF,

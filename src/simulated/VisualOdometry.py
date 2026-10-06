@@ -46,7 +46,7 @@ class VisualOdometry:
         self._latest = None
 
         self._ready = asyncio.Event()
-
+        self._fusion_enabled = False
         self._valid = 0
         self._pose_covariance = _pose_covariance(
             position_sigma, np.deg2rad(attitude_sigma_deg)
@@ -111,14 +111,16 @@ class VisualOdometry:
             timestamp,
         )
 
-    def _body_in_marker(self, obs):
-        R_cm, _ = cv2.Rodrigues(obs.rvec)
-        R_mc = R_cm.T
-        p_mc = -R_mc @ obs.tvec
+    def _marker_in_body(self, obs):
+        R_camera_marker, _ = cv2.Rodrigues(obs.rvec)
 
-        R_mb = R_mc @ self.camera_to_body.T
-        p_mb = p_mc - R_mb @ self.camera_position_body
-        return p_mb, R_mb
+        p_body_marker = (
+            self.camera_position_body
+            + self.camera_to_body @ obs.tvec
+        )
+        R_body_marker = self.camera_to_body @ R_camera_marker
+
+        return p_body_marker, R_body_marker
 
     async def _initialize_frame(self, drone, obs):
         pv, attitude = await asyncio.gather(
@@ -126,23 +128,25 @@ class VisualOdometry:
             fc.get_drone_attitude_euler(drone),
         )
 
-        p_nb = np.array([
+        p_ned_body = np.array([
             pv.position.north_m,
             pv.position.east_m,
             pv.position.down_m,
         ])
-        R_nb = _body_to_ned(attitude)
-        p_mb, R_mb = self._body_in_marker(obs)
+        R_ned_body = _body_to_ned(attitude)
+        p_body_marker, R_body_marker = self._marker_in_body(obs)
 
         # Fixed marker pose in the existing PX4 local-NED frame.
-        self._R_ned_marker = R_nb @ R_mb.T
-        self._p_ned_marker = p_nb - self._R_ned_marker @ p_mb
+        self._R_ned_marker = R_ned_body @ R_body_marker
+        self._p_ned_marker = p_ned_body + R_ned_body @ p_body_marker
 
-    def _local_body_pose(self, obs):
-        p_mb, R_mb = self._body_in_marker(obs)
+    def _local_body_pose(self, obs, attitude):
+        p_body_marker, R_body_marker = self._marker_in_body(obs)
+        R_ned_body = _body_to_ned(attitude)
+
         return (
-            self._p_ned_marker + self._R_ned_marker @ p_mb,
-            self._R_ned_marker @ R_mb,
+            self._p_ned_marker - R_ned_body @ p_body_marker,
+            self._R_ned_marker @ R_body_marker.T,
         )
 
     def _vpe(self, position, R):
@@ -182,11 +186,19 @@ class VisualOdometry:
                 self._ready.set()
 
 
-            position, R = self._local_body_pose(obs)
+            attitude = await fc.get_drone_attitude_euler(drone)
+            position, R = self._local_body_pose(obs, attitude)
+            
+            if self._fusion_enabled:
+                await drone.mocap.set_vision_position_estimate(
+                    self._vpe(position, R)
+                )
+    
+    def enable_fusion(self):
+        self._fusion_enabled = True
 
-            await drone.mocap.set_vision_position_estimate(
-                self._vpe(position, R)
-            )
+    def disable_fusion(self):
+        self._fusion_enabled = False
 
 
 
