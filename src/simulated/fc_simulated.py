@@ -197,15 +197,15 @@ async def fly_to_global(drone: System,
 
 async def fly_to_ned_smooth(drone: System,
                             target: PositionNedYaw,
-                            threshold: float = 0.3,
+                            threshold: float = 0.3, velocity_threshold = 0.1,
                             max_velocity=3.0,max_acceleration=3.0,max_jerk=2.0):
 
     otg = ruckig.Ruckig(3)
     traj = ruckig.Trajectory(3)
     inp = ruckig.InputParameter(3)
-    pos = await get_drone_ned_position(drone)
-    inp.current_position = [pos.north_m, pos.east_m, pos.down_m]
-    inp.current_velocity = [0.0, 0.0, 0.0]
+    pv = await get_drone_ned_position_velocity(drone)
+    inp.current_position = [pv.position.north_m, pv.position.east_m, pv.position.down_m]
+    inp.current_velocity = [pv.velocity.north_m_s, pv.velocity.east_m_s, pv.velocity.down_m_s]
     inp.current_acceleration = [0.0, 0.0, 0.0]
     inp.target_position     = [target.north_m, target.east_m, target.down_m]
     inp.target_velocity     = [0.0, 0.0, 0.0]
@@ -237,7 +237,8 @@ async def fly_to_ned_smooth(drone: System,
             print("Trajectory successfully completed!")
             break
     while True:
-        pos_vel_reached = await check_ned_position_reached_with_velocity(drone, PositionNedYaw(*inp.target_position, float("nan")), tolerance=threshold, velocity_threshold=0.1)
+        pos_vel_reached = await check_ned_position_reached_with_velocity(
+            drone, PositionNedYaw(*inp.target_position, float("nan")), tolerance=threshold, velocity_threshold=velocity_threshold)
         if pos_vel_reached:
             return
 async def fly_to_ned_recomp(drone: System,
