@@ -281,3 +281,12 @@ async def _smooth_move_to_target(drone, target, heading, acceleration,
             return
         
 
+async def wait_gps_ctrl(drone, value=4, timeout=2.0):
+    start = time.perf_counter()
+
+    while await drone.param.get_param_int("EKF2_GPS_CTRL") != value:
+        if time.perf_counter() - start > timeout:
+            raise TimeoutError(
+                f"EKF2_GPS_CTRL did not become {value}"
+            )
+        await asyncio.sleep(0.05)

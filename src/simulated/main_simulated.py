@@ -146,49 +146,17 @@ async def run():
             vision = VisualOdometry(
                 video, detector, mtx, dist, marker_size=0.5, marker_id=None)
             vision_task = asyncio.create_task(vision.run(drone))
-            gps_failed = False
-            gps_ctrl = await drone.param.get_param_int("EKF2_GPS_CTRL")
-            try:
-                await vision.wait_ready()
 
-                
-                initial_state = None
-                if transition_task is not None:
-                    await _wait_alignment_entry(vision, transition_task)
-                    initial_state = transition_task.handoff
-                    transition_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await transition_task
-                print("-- Visual odometry active, disabling GPS")
-                await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
-                vision.enable_fusion()
-                """await drone.failure.inject(
-                    FailureUnit.SENSOR_GPS,
-                    FailureType.OFF,
-                    0,
-                )
-                gps_failed = True"""
+            result = await align_noGPS_with_failsafe(drone, vision, transition_task)
 
-                result = await align_sync(drone, vision, initial_state)
-
-                if result is False:
-                    print("Aruco alignment failed!")
-                else:
-                    print("Aruco alignment completed!")
-                    await asyncio.sleep(5)
-                    
-            finally:
-                if gps_failed:
-                    print("-- Restoring GPS")
-                    await drone.failure.inject(
-                        FailureUnit.SENSOR_GPS,
-                        FailureType.OK,
-                        0,
-                    )
-                await drone.param.set_param_int("EKF2_GPS_CTRL", gps_ctrl)
-                vision_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await vision_task
+            if result is False:
+                print("Aruco alignment failed!")
+            else:
+                print("Aruco alignment completed!")
+            
+            vision_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await vision_task
             print("Going to next waypoint")
                 
         else:
@@ -199,6 +167,12 @@ async def run():
     await drone.offboard.stop()
     await drone.action.return_to_launch()
 
+async def _wait_marker_loss(vision, timeout=2.0):
+    while True:
+        if vision.get_observation(max_age=timeout) is None:
+            return
+
+        await asyncio.sleep(0.05)
 
 async def _wait_alignment_entry(vision, transition_task,
                                 maximum_angle=np.deg2rad(30.),
@@ -310,12 +284,87 @@ async def align_mpc_traj(drone,video,detector,mtx,dist):
         target_altitude=1.0,
         initial_acceleration_ned=(0.0, 0.0, 0.0),
     )
-async def align_sync(drone,vision,initial_state):
+
+
+async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_task=None):
+    gps_ctrl = await drone.param.get_param_int("EKF2_GPS_CTRL")
+    
+    await vision.wait_ready()
+    pv = await fc.get_drone_ned_position_velocity(drone)
+    return_down = pv.position.down_m
+
+    initial_state = None
+
+    if transition_task is not None:
+        await _wait_alignment_entry(vision, transition_task)
+        initial_state = transition_task.handoff
+        transition_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await transition_task
+
+    print("-- Disabling GPS position fusion")
+    await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
+    await utilities.wait_gps_ctrl(drone)
+    vision.enable_fusion()
+
+    operation_task = asyncio.create_task(align_ruckig_fov_safe(
+            drone, vision, initial_state, return_down)
+    )
+    loss_task = asyncio.create_task( _wait_marker_loss(vision, 2.0))
+
+    done, _ = await asyncio.wait(
+        (operation_task, loss_task),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    if loss_task in done:
+        print("-- ArUco lost for 2 seconds, aborting")
+
+        operation_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await operation_task
+
+        vision.disable_fusion()
+
+        print("-- Restoring GPS fusion")
+        await drone.param.set_param_int("EKF2_GPS_CTRL", gps_ctrl)
+
+        print("-- Recovering altitude using GPS")
+        pos = await fc.get_drone_ned_position(drone)
+        await fc.fly_to_ned_smooth(
+            drone, PositionNedYaw(pos.north_m, pos.east_m, return_down,float("nan")), velocity_threshold=0.3, max_jerk=4
+        )
+        return False
+
+    success = await operation_task
+
+
+    print("-- Restoring GPS fusion")
+    await drone.param.set_param_int(
+        "EKF2_GPS_CTRL", gps_ctrl
+    )
+    vision.disable_fusion()
+
+    loss_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await loss_task
+
+    return success
+
+async def align_ruckig_fov_safe(drone,vision,initial_state,return_down):
     success = await align_to_aruco_ruckig_adaptive(drone,vision,
         frame_width=1280, frame_height=960, initial_state=initial_state
     )    
-    print("Alignment succeeded" if success else "Alignment failed")
+    if not success:
+        return False
     await asyncio.sleep(5)
+    print("-- Alignment complete, returning to altitude")
+    pos = await fc.get_drone_ned_position(drone)
+    await fc.fly_to_ned_smooth(
+        drone, PositionNedYaw(pos.north_m, pos.east_m, return_down, float("nan")), velocity_threshold=0.3, max_jerk=4
+    )
+    return True
+
 
 async def align_visual(drone,video,detector,mtx,dist):
     #await asyncio.sleep(5)
