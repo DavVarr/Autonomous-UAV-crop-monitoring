@@ -13,8 +13,8 @@ import cv2.aruco as aruco
 from camera_simulated import Video
 #from mpc import ArucoTrackingMPC, align_to_aruco_mpc
 from mpc_traj import CasadiArucoTrajectoryPlanner, align_to_aruco_casadi
-from alignments import align_to_aruco_visual_hybrid
-from sync_alignment import align_to_aruco_ruckig_adaptive
+from vs_hybrid_alignment import align_to_aruco_visual_hybrid
+from fov_traj_alignment import align_to_aruco_ruckig_adaptive
 import utilities_simulated as utilities
 import fc_simulated as fc
 import threading
