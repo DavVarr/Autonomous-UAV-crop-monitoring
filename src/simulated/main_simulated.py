@@ -302,6 +302,9 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
         with suppress(asyncio.CancelledError):
             await transition_task
 
+    vision.enable_frame_initialization()
+    await vision.wait_frame_ready()
+
     print("-- Disabling GPS position fusion")
     await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
     await utilities.wait_gps_ctrl(drone)

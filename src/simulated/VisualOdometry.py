@@ -47,6 +47,8 @@ class VisualOdometry:
 
         self._ready = asyncio.Event()
         self._fusion_enabled = False
+        self._initialize_after = None
+        self._frame_ready = asyncio.Event()
         self._valid = 0
         self._pose_covariance = _pose_covariance(
             position_sigma, np.deg2rad(attitude_sigma_deg)
@@ -56,6 +58,12 @@ class VisualOdometry:
         VisualOdometry._next_reset_counter = (
             VisualOdometry._next_reset_counter + 1
         ) & 0xFF
+
+    def enable_frame_initialization(self):
+        self._initialize_after = time.perf_counter()
+
+    async def wait_frame_ready(self):
+        await self._frame_ready.wait()
 
     async def wait_ready(self):
         await self._ready.wait()
@@ -177,13 +185,19 @@ class VisualOdometry:
                 continue
 
             self._latest = obs
-
-            if self._R_ned_marker is None:
-                await self._initialize_frame(drone, obs)
-
             self._valid += 1
             if self._valid >= 10:
                 self._ready.set()
+
+            if self._R_ned_marker is None:
+                if (
+                    self._initialize_after is None
+                    or obs.timestamp < self._initialize_after
+                ):
+                    continue
+                await self._initialize_frame(drone, obs)
+                self._frame_ready.set()
+
 
 
             attitude = await fc.get_drone_attitude_euler(drone)
