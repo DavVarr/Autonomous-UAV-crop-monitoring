@@ -1,0 +1,20 @@
+{
+  "system_address": "serial:///dev/serial0:57600",
+  "waypoints": [],
+  "camera": {
+    "resolution": [1640, 1232],
+    "intrinsic_matrix": [
+      [1607.0, 0.0, 820.0],
+      [0.0, 1607.0, 616.0],
+      [0.0, 0.0, 1.0]
+    ],
+    "distortion_coefficients": [0.0, 0.0, 0.0, 0.0],
+    "camera_to_body": [
+      [0.0, -1.0, 0.0],
+      [1.0, 0.0, 0.0],
+      [0.0, 0.0, 1.0]
+    ],
+    "camera_position_body": [0.0, 0.0, 0.0]
+  },
+  "aruco_size": 0.25
+}

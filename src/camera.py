@@ -6,6 +6,19 @@ from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 from time import perf_counter, sleep
 
+class Video():
+    def __init__(self, camera: Picamera2):
+        self.camera = camera
+
+    def frame(self):
+        request = self.camera.capture_request()
+        frame = request.make_array("main")
+        request.release()
+        return frame
+
+    def frame_available(self):
+        return True
+
 def my_estimatePoseSingleMarkers(corners, marker_size, mtx, distortion):
     '''
     This will estimate the rvec and tvec for each of the marker corners detected by:

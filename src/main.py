@@ -1,18 +1,24 @@
 import asyncio
+import json
+import os
 from time import perf_counter, time
 import logging
 from math import fabs
 from mavsdk import System
-from mavsdk.offboard import VelocityNedYaw, OffboardError
+from mavsdk.offboard import VelocityNedYaw, OffboardError, PositionNedYaw
 from mavsdk.mission import MissionItem, MissionError
 from mavsdk.action import OrbitYawBehavior
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 import numpy as np
 import cv2.aruco as aruco
+from contextlib import suppress
 
-import utilities
-import fc
+import camera as camera_module
+import simulated.fc_simulated as fc
+import simulated.utilities_simulated as utilities
+from simulated.fov_traj_alignment import align_to_aruco_ruckig_adaptive
+from simulated.VisualOdometry import VisualOdometry
 
 #Defining constants
 ARUCO_SEARCH_ROUNDS = 3
@@ -36,14 +42,22 @@ ARUCO_DETECTOR_THRESHOLD_WINDOW_MAX = 45
 ARUCO_DETECTOR_THRESHOLD_WINDOW_STEP = 15
 ARUCO_DETECTOR_MIN_MARKER_PERIMETER_RATE = 0.1
 
+TAKE_OFF_ALTITUDE = 3.0
+
 async def run():
 
     #Prepare logs
     logging.basicConfig(filename="log.txt", level=logging.INFO, format="%(asctime)s %(message)s")
 
+    with open(os.path.join(os.path.dirname(__file__), "..", "config.json")) as config_file:
+        config = json.load(config_file)
+
+    if len(config["waypoints"]) == 0:
+        raise ValueError("At least one waypoint must be set in config.json")
+
     drone = System()
     print("Connecting...")
-    await drone.connect(system_address="serial:///dev/serial0:57600")
+    await drone.connect(system_address=config["system_address"])
 
     print("Waiting for drone to connect...")
     async for state in drone.core.connection_state():
@@ -52,270 +66,263 @@ async def run():
             logging.info("Drone connection estabilished")
             break
 
-    await drone.mission.set_return_to_launch_after_mission(True)
-
     print("Waiting for drone to have a global position estimate...")
     async for health in drone.telemetry.health():
         if health.is_global_position_ok and health.is_home_position_ok:
             print("-- Global position estimate OK")
             break
 
-    # Get mission items already loaded into the vehicle with QGround Control
-    mission_plan = await drone.mission.download_mission()
-    mission_items = mission_plan.mission_items
-
-    # Start offboard mode
-    print("-- Setting initial setpoint")
-    await drone.offboard.set_velocity_ned(VelocityNedYaw(0, 0, 0, 0))
-    try:
-        await drone.offboard.start()
-        print("Offboard mode engaged!")
-    except OffboardError as error:
-        print(f"Starting offboard mode failed with error code:"
-            f" {error._result.result}")
-        return
-
     # Preparing camera
     camera = Picamera2()
-    main_stream = {"size": (1640, 1232)}
-    lores_stream = {"size": (1640, 1232)}
+    frame_width, frame_height = config["camera"]["resolution"]
+    main_stream = {"size": (frame_width, frame_height)}
+    lores_stream = {"size": (frame_width, frame_height)}
     video_config = camera.create_video_configuration(main_stream, lores_stream, encode="lores")
     camera.configure(video_config)
     encoder = H264Encoder(10000000)
 
-    # intrinsic matrix of the Raspberry Pi camera, set with a resolution of 1640 × 1232
-    mtx = np.array([[1607, 0, 820.0],
-                    [0, 1607, 616.0],
-                    [0, 0, 1]])
-    dist = np.array([0.0, 0.0, 0.0, 0.0])
+    mtx = np.array(config["camera"]["intrinsic_matrix"])
+    dist = np.array(config["camera"]["distortion_coefficients"])
+    camera_to_body = np.array(config["camera"]["camera_to_body"])
+    camera_position_body = np.array(config["camera"]["camera_position_body"])
+    marker_size = config["aruco_size"]
 
     #Preparing Aruco detector
     detector = buildArucoDetector()
 
     camera.start_recording(encoder, 'video.h264')
+    video = camera_module.Video(camera)
     print("-- Arming")
     logging.info("Arming and taking off")
     await drone.action.arm()
     await asyncio.sleep(1)
-    await drone.action.takeoff()
-    await asyncio.sleep(3)
-
-    print("-- Starting mission")
+    await drone.offboard.set_position_ned(PositionNedYaw(
+        0,0,-TAKE_OFF_ALTITUDE,float('nan')
+    ))
     try:
-        await drone.mission.start_mission()
-        print("Mission started!")
-        #battery = await fc.get_drone_remaining_battery(drone)
-        #logging.info(f"Mission started with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
-    except MissionError as error:
-        print(f"Starting mission failed with error code:"
-            f" {error._result.result}")
+        await drone.offboard.start()
+        print("-- Offboard engaged")
+    except OffboardError as e:
+        print(f"Offboard start failed: {e._result.result}")
+        await drone.action.return_to_launch()
         return
 
-    for i, item in enumerate(mission_items):
+    while True:
+        pos = await fc.get_drone_global_position(drone)
+        if fabs(pos.relative_altitude_m - TAKE_OFF_ALTITUDE) <= 0.5:
+            break
 
-        if item.vehicle_action == MissionItem.VehicleAction.TAKEOFF or item.vehicle_action == MissionItem.VehicleAction.LAND:
-            continue
+    for waypoint in config["waypoints"]:
+        print(f"Flying to waypoint {waypoint['latitude']}, {waypoint['longitude']}")
+        logging.info(f"Flying to waypoint {waypoint['latitude']}, {waypoint['longitude']}")
+        await fc.fly_to_global(
+            drone,
+            waypoint["latitude"],
+            waypoint["longitude"],
+            waypoint["altitude"],
+            heading=waypoint["heading"]
+        )
+        await asyncio.sleep(1)
 
-        while True:
-            mission_progress_start = perf_counter()
-            progress = await fc.get_drone_mission_progress(drone)
-            mission_progress_end = perf_counter()
-            logging.info(f"Getting mission progress took {mission_progress_end - mission_progress_start} seconds")
-            print(f"Current item: {i}, progress: {progress.current}")
-            if (progress.current) == i + 1:
-                break
-
-        print("Checkpoint reached, pausing mission")
-        logging.info(f"Aruco checkpoint reached, pausing mission")
-        pause_mission_start = perf_counter()
-        await drone.mission.pause_mission()
-        pause_mission_end = perf_counter()
-        logging.info(f"Pausing mission took {pause_mission_end - pause_mission_start} seconds")
-
-        logging.info("Starting aruco search")
         arucoFound = None
         for s in range(ARUCO_SEARCH_TRIES):
-            arucoFound = await aruco_search(drone, camera, detector, mtx, dist, item)
+            arucoFound, transition_task = await aruco_search(
+                drone, video, detector, mtx, dist, marker_size)
             if not arucoFound is None:
                 break
 
         if not arucoFound is None:
             print("Aruco located!")
-            logging.info("Aruco search successful")
-            result = await align_to_aruco(drone, camera, detector, mtx, dist, item)
+            vision = VisualOdometry(
+                video, detector, mtx, dist, marker_size=marker_size, marker_id=None,
+                camera_to_body=camera_to_body, camera_position_body=camera_position_body)
+            vision_task = asyncio.create_task(vision.run(drone))
+
+            result = await align_noGPS_with_failsafe(
+                drone, vision, transition_task, frame_width, frame_height)
 
             if result is False:
                 print("Aruco alignment failed!")
-                logging.info("Aruco alignment failed!")
             else:
                 print("Aruco alignment completed!")
-                logging.info("Aruco alignment completed!")
 
-            print("Resuming mission")
-            logging.info("Resuming mission")
-            await drone.mission.start_mission()
+            vision_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await vision_task
 
         else:
-            print("Aruco not found, resuming mission")
-            logging.info("Aruco not found, resuming mission")
-            await drone.mission.start_mission()
+            print("Aruco not found, going to next waypoint")
 
     print("Mission completed! Return to home")
     logging.info(f"Mission completed, return to home")
+    await drone.offboard.stop()
     await drone.action.return_to_launch()
 
     camera.stop_recording()
     camera.close()
 
-async def aruco_search(drone: System, camera: Picamera2, detector, mtx, dist, item: MissionItem):
+async def _wait_marker_loss(vision, timeout=2.0):
+    while True:
+        if vision.get_observation(max_age=timeout) is None:
+            return
+
+        await asyncio.sleep(0.05)
+
+async def _wait_alignment_entry(vision, transition_task,
+                                maximum_angle=np.deg2rad(30.),
+                                low_speed=0.2,
+                                stable_time=0.15):
+    good_since = None
+    cos_limit = np.cos(maximum_angle)
+
+    while True:
+        obs = vision.get_observation(max_age=0.15)
+        state = transition_task.handoff
+        good = False
+
+        if obs is not None and all(k in state for k in ("p", "v")):
+            p = state["p"]
+            v = state["v"]
+
+            to_target = transition_task.target_xy - p
+            speed = np.linalg.norm(v)
+            distance = np.linalg.norm(to_target)
+
+            if speed < low_speed or distance < 0.1:
+                motion_ok = True
+            else:
+                direction_cos = np.dot(v, to_target) / (speed * distance)
+                motion_ok = direction_cos >= cos_limit
+
+            good = motion_ok
+
+        if good:
+            if good_since is None:
+                good_since = perf_counter()
+            elif perf_counter() - good_since >= stable_time:
+                return
+        else:
+            good_since = None
+
+        await asyncio.sleep(0.05)
+
+async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_task, frame_width, frame_height):
+    gps_ctrl = await drone.param.get_param_int("EKF2_GPS_CTRL")
+
+    await vision.wait_ready()
+    pv = await fc.get_drone_ned_position_velocity(drone)
+    return_down = pv.position.down_m
+
+    initial_state = None
+
+    if transition_task is not None:
+        await _wait_alignment_entry(vision, transition_task)
+        initial_state = transition_task.handoff
+        transition_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await transition_task
+
+    vision.enable_frame_initialization()
+    await vision.wait_frame_ready()
+
+    print("-- Disabling GPS position fusion")
+    await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
+    await utilities.wait_gps_ctrl(drone)
+    vision.enable_fusion()
+
+    operation_task = asyncio.create_task(align_ruckig_fov_safe(
+            drone, vision, initial_state, return_down, frame_width, frame_height)
+    )
+    loss_task = asyncio.create_task( _wait_marker_loss(vision, 2.0))
+
+    done, _ = await asyncio.wait(
+        (operation_task, loss_task),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    if loss_task in done:
+        print("-- ArUco lost for 2 seconds, aborting")
+
+        operation_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await operation_task
+
+        vision.disable_fusion()
+
+        print("-- Restoring GPS fusion")
+        await drone.param.set_param_int("EKF2_GPS_CTRL", gps_ctrl)
+
+        print("-- Recovering altitude using GPS")
+        pos = await fc.get_drone_ned_position(drone)
+        await fc.fly_to_ned_smooth(
+            drone, PositionNedYaw(pos.north_m, pos.east_m, return_down,float("nan")), velocity_threshold=0.3, max_jerk=4
+        )
+        return False
+
+    success = await operation_task
+
+    print("-- Restoring GPS fusion")
+    await drone.param.set_param_int(
+        "EKF2_GPS_CTRL", gps_ctrl
+    )
+    vision.disable_fusion()
+
+    loss_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await loss_task
+
+    return success
+
+async def align_ruckig_fov_safe(drone,vision,initial_state,return_down,frame_width,frame_height):
+    success = await align_to_aruco_ruckig_adaptive(drone,vision,
+        frame_width=frame_width, frame_height=frame_height, initial_state=initial_state
+    )
+    if not success:
+        return False
+    await asyncio.sleep(5)
+    print("-- Alignment complete, returning to altitude")
+    pos = await fc.get_drone_ned_position(drone)
+    await fc.fly_to_ned_smooth(
+        drone, PositionNedYaw(pos.north_m, pos.east_m, return_down, float("nan")), velocity_threshold=0.3, max_jerk=4
+    )
+    return True
+
+async def aruco_search(drone: System, video: camera_module.Video, detector, mtx, dist, marker_size):
     print("Starting aruco search")
-
-    #get_battery_start = perf_counter()
-    #battery = await fc.get_drone_remaining_battery(drone)
-    #get_battery_end = perf_counter()
-    #logging.info(f"Getting battery took {get_battery_end - get_battery_start} seconds")
-    #logging.info(f"Started aruco search with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
-
+    battery = await fc.get_drone_remaining_battery(drone)
+    logging.info(f"Started aruco search with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
     round = 1
-
-    get_altitude_start = perf_counter()
     initial_altitude = await fc.get_drone_altitude(drone)
-    get_altitude_end = perf_counter()
-    logging.info(f"Getting altitude took {get_altitude_end - get_altitude_start} seconds")
-
+    center_ned = await fc.get_drone_ned_position(drone)
+    heading = await fc.get_drone_heading(drone)
     while round < ARUCO_SEARCH_ROUNDS:
 
-        print(f"Search round number {round}")
-        logging.info(f"Search round number {round}")
-        look_for_aruco_start = perf_counter()
-        arucoFound = utilities.look_for_aruco_image(camera, detector, mtx, dist)
-        look_for_aruco_end = perf_counter()
-
+        arucoFound = utilities.look_for_aruco(video, detector, mtx, dist, marker_size)
         if not arucoFound is None:
-            logging.info(f"Finding Aruco before search took {look_for_aruco_end - look_for_aruco_start} seconds")
-            return arucoFound
+            return arucoFound, None
 
         radius = ARUCO_SEARCH_RADIUS_MULTIPLIER * round
 
         print("Starting orbit")
-        do_orbit_start = perf_counter()
-        await drone.action.do_orbit(radius,
-                                    1,
-                                    OrbitYawBehavior.HOLD_INITIAL_HEADING,
-                                    item.latitude_deg,
-                                    item.longitude_deg,
-                                    initial_altitude)
-        do_orbit_end = perf_counter()
-        logging.info(f"Starting orbit took {do_orbit_end - do_orbit_start} seconds")
 
-        target_time = time() + ARUCO_SEARCH_STOP_ADDED_TIME * round
-
-        while time() < target_time:
-            arucoFound = utilities.look_for_aruco_image(camera, detector, mtx, dist)
-            # Double check to avoid problems due to camera angle
-            if not arucoFound is None:
-                print("Spotted marker")
-                logging.info("Spotted marker")
-                await drone.action.hold()
-                target_time = target_time + ARUCO_SEARCH_SPOTTED_ADDED_TIME
-                await asyncio.sleep(2)
-
-                arucoFound = utilities.look_for_aruco_image(camera, detector, mtx, dist)
-                if not arucoFound is None:
-                    print("Aruco found")
-                    logging.info("Aruco found")
-                    return arucoFound
-                else:
-                    print("False positive, resuming orbit")
-                    logging.info("False positive, resuming orbit")
-                    await drone.action.do_orbit(radius,
-                                    1,
-                                    OrbitYawBehavior.HOLD_INITIAL_HEADING,
-                                    item.latitude_deg,
-                                    item.longitude_deg,
-                                    initial_altitude)
-                    continue
+        result, transition_task = await utilities.look_for_aruco_orbit(
+            drone, video, detector, mtx, dist,
+            center_ned, heading, radius, 1, marker_size,
+        )
+        if result is not None:
+            return result, transition_task
         round += 1
-    
-    await drone.action.goto_location(item.latitude_deg, item.longitude_deg, initial_altitude, item.yaw_deg)
+
+    center_ned_yaw = PositionNedYaw(
+        center_ned.north_m,
+        center_ned.east_m,
+        center_ned.down_m,
+        heading
+    )
+    await fc.fly_to_ned(drone, center_ned_yaw, 0.5)
     print("Aruco search failed, awaiting the drone to navigate to the initial position")
-    logging.info("Aruco search failed")
     await asyncio.sleep(5)
-    return None
-
-async def align_to_aruco(drone: System, camera: Picamera2, detector, mtx, dist, item: MissionItem):
-    print("Starting alignment procedure")
-    logging.info("Starting alignment procedure")
-    #battery = await fc.get_drone_remaining_battery(drone)
-    #logging.info(f"Started aruco alignment with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
-
-    aruco_detection_failures = 0
-    procedure_failures = 0
-    lined_up = False
-
-    get_initial_position_start = perf_counter()
-    initial_position = await fc.get_drone_global_position(drone)
-    get_initial_position_end = perf_counter()
-    logging.info(f"Getting current global position took {get_initial_position_end - get_initial_position_start} seconds")
-
-    heading = await fc.get_drone_heading(drone)
-    initial_heading = heading
-
-    while True:
-        get_aruco_distances_start = perf_counter()
-        aruco_distances = utilities.get_aruco_distances_and_yaw_image(camera, detector, mtx, dist)
-        get_aruco_distances_end = perf_counter()
-        logging.info(f"Getting Aruco distances took {get_aruco_distances_end - get_aruco_distances_start} seconds")
-
-        if aruco_distances is None:
-            aruco_detection_failures += 1
-            print(f"Aruco not found for {aruco_detection_failures} times")
-            if aruco_detection_failures >= ALIGNMENT_MAX_DETECTION_FAILURES and procedure_failures <= ALIGNMENT_MAX_PROCEDURE_FAILURES:
-                print("Aruco detection failed, retry from inital position")
-                await drone.action.goto_location(initial_position.latitude_deg, initial_position.longitude_deg, initial_position.absolute_altitude_m, initial_heading)
-                aruco_detection_failures = 0
-                procedure_failures += 1
-                print("Awaiting the drone to navigate to the initial position")
-                await asyncio.sleep(5)
-            elif aruco_detection_failures >= ALIGNMENT_MAX_DETECTION_FAILURES and procedure_failures >= ALIGNMENT_MAX_PROCEDURE_FAILURES:
-                print("Aruco detection failed multiple times, aborting alignment")
-                return False
-            continue
-
-        # Security check to prevent false positives from crashing the drone
-        # Calculated as the maximum distance of a marker in the field of view at top altitude of 9 metres
-        if aruco_distances[0] > ALIGNMENT_MAX_ARUCO_DISTANCE or aruco_distances[1] > ALIGNMENT_MAX_ARUCO_DISTANCE: continue
-
-        aruco_detection_failures = 0
-        current_position = await fc.get_drone_global_position(drone)
-
-        calculate_target_position_start = perf_counter()
-        target_coordinates = await utilities.calculate_target_global_position(drone, aruco_distances)
-        calculate_target_position_end = perf_counter()
-        logging.info(f"Calculating target global position took {calculate_target_position_end - calculate_target_position_start} seconds")
-
-        vertical_delta = aruco_distances[2] - ALIGNMENT_TARGET_ALTITUDE
-
-        if fabs(aruco_distances[0]) < ALIGNMENT_LINEUP_DISTANCE and fabs(aruco_distances[1]) < ALIGNMENT_LINEUP_DISTANCE:
-            lined_up = True
-            
-            # Weighing the results for smoother manouvres
-            target_coordinates.absolute_altitude_m = current_position.absolute_altitude_m - (fabs(vertical_delta * ALIGNMENT_MANOUVRES_FACTOR) * utilities.sign(vertical_delta))
-            heading = (await fc.get_drone_heading(drone) + (aruco_distances[3] * ALIGNMENT_MANOUVRES_FACTOR)) % 360
-        else:
-            if not lined_up: target_coordinates.absolute_altitude_m = initial_position.absolute_altitude_m
-
-        if fabs(aruco_distances[0]) < ALIGNMENT_MAX_ERROR_DISTANCE and fabs(aruco_distances[1]) < ALIGNMENT_MAX_ERROR_DISTANCE and fabs(vertical_delta) < ALIGNMENT_MAX_ERROR_DISTANCE and (aruco_distances[3] < ALIGNMENT_YAW_MIN_DISTANCE or aruco_distances[3] > ALIGNMENT_YAW_MAX_DISTANCE):
-            await drone.action.hold()
-            await asyncio.sleep(3)
-            await drone.action.goto_location(target_coordinates.latitude_deg, target_coordinates.longitude_deg, initial_position.absolute_altitude_m, initial_heading)
-            await asyncio.sleep(7)
-            return True
-
-        goto_start = perf_counter()
-        await drone.action.goto_location(target_coordinates.latitude_deg, target_coordinates.longitude_deg, target_coordinates.absolute_altitude_m, heading)
-        goto_end = perf_counter()
-        logging.info(f"Issuing goto command took {goto_end - goto_start} seconds")
+    return None, None
 
 
 def buildArucoDetector():
