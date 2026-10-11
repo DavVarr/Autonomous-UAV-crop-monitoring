@@ -191,7 +191,7 @@ def my_estimatePoseSingleMarkers(corners, marker_size, mtx, distortion):
     print(f"forward_distance: {forward_distance}, right_distance: {right_distance}, vertical_distance: {vertical_distance}")"""
     return rvecs, tvecs, trash
 
-def checkArucoPresence(video: Video, detector, mtx, dist):
+def checkArucoPresence(video: Video, detector, mtx, dist, marker_size=0.5):
     while True:
         if not video.frame_available():
             continue
@@ -205,7 +205,7 @@ def checkArucoPresence(video: Video, detector, mtx, dist):
         #cv2.imshow("Drone View", frame)
         #cv2.waitKey(1) 
         if not markerIds is None:
-            return my_estimatePoseSingleMarkers(markerCorners, 0.5, mtx, dist)
+            return my_estimatePoseSingleMarkers(markerCorners, marker_size, mtx, dist)
         else:
             return None
 

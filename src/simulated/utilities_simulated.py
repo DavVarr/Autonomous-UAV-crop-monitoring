@@ -13,9 +13,9 @@ def sign(num):
     if num == 0: return 0
     return -1 if num < 0 else 1
 
-def look_for_aruco(video: Video, detector, mtx, dist):
+def look_for_aruco(video: Video, detector, mtx, dist, marker_size=0.5):
     for i in range(10):
-        result = checkArucoPresence(video, detector, mtx, dist)
+        result = checkArucoPresence(video, detector, mtx, dist, marker_size)
         if not result is None:
             return result
     return None
@@ -88,14 +88,14 @@ def get_aruco_distances_and_yaw(rvecs, tvecs) -> list[float] | None:
     ]
 
 
-def detect_aruco_distances_and_yaw(video: Video, detector, mtx, dist):
+def detect_aruco_distances_and_yaw(video: Video, detector, mtx, dist, marker_size=0.5):
     """Legacy convenience wrapper for older alignment/search functions.
 
     New code should detect once and call ``get_aruco_distances_and_yaw`` with
     the returned pose. This wrapper is kept only so unrelated old project
     functions can still use their previous video-based behavior.
     """
-    aruco_result = checkArucoPresence(video, detector, mtx, dist)
+    aruco_result = checkArucoPresence(video, detector, mtx, dist, marker_size)
     if aruco_result is None:
         return None
     rvecs, tvecs, _ = aruco_result
@@ -169,7 +169,7 @@ def normalize_heading(heading: float):
 
 
 async def look_for_aruco_orbit(drone : System, video : Video, detector, mtx, dist,
-                         center_ned : PositionNed, heading, radius, speed):
+                         center_ned : PositionNed, heading, radius, speed, marker_size=0.5):
     omega = speed / radius
     accumulated_angle = 0.0
     prev_radial = None
@@ -226,7 +226,7 @@ async def look_for_aruco_orbit(drone : System, video : Video, detector, mtx, dis
             AccelerationNed(an, ae, 0.0)
         )
 
-        result = detect_aruco_distances_and_yaw(video, detector, mtx, dist)
+        result = detect_aruco_distances_and_yaw(video, detector, mtx, dist, marker_size)
         if result is not None:
             target_ned = await calculate_target_ned_position(drone,result)
             handoff = {}
