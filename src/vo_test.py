@@ -10,7 +10,7 @@ from contextlib import suppress
 
 import cv2.aruco as aruco
 import numpy as np
-from mavsdk import System
+from mavsdk_grpc import System
 from picamera2 import Picamera2
 
 import camera as camera_module

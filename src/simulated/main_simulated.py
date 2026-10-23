@@ -2,11 +2,11 @@ import asyncio
 import time
 import logging
 from math import fabs, pi, sin, cos
-from mavsdk import System
-from mavsdk.offboard import VelocityNedYaw, OffboardError, PositionNedYaw, PositionGlobalYaw
-from mavsdk.mission import MissionItem, MissionPlan, MissionError
-from mavsdk.action import OrbitYawBehavior
-from mavsdk.telemetry import Position
+from mavsdk_grpc import System
+from mavsdk_grpc.offboard import VelocityNedYaw, OffboardError, PositionNedYaw, PositionGlobalYaw
+from mavsdk_grpc.mission import MissionItem, MissionPlan, MissionError
+from mavsdk_grpc.action import OrbitYawBehavior
+from mavsdk_grpc.telemetry import Position
 import numpy as np
 import cv2.aruco as aruco
 
@@ -20,7 +20,7 @@ import fc_simulated as fc
 import threading
 import cv2
 from contextlib import suppress
-from mavsdk.failure import FailureUnit, FailureType
+from mavsdk_grpc.failure import FailureUnit, FailureType
 from VisualOdometry import VisualOdometry
 def display_thread_fn(video: Video, stop_event: threading.Event):
     while not stop_event.is_set():

@@ -4,10 +4,10 @@ import os
 from time import perf_counter, time
 import logging
 from math import fabs
-from mavsdk import System
-from mavsdk.offboard import VelocityNedYaw, OffboardError, PositionNedYaw
-from mavsdk.mission import MissionItem, MissionError
-from mavsdk.action import OrbitYawBehavior
+from mavsdk_grpc import System
+from mavsdk_grpc.offboard import VelocityNedYaw, OffboardError, PositionNedYaw
+from mavsdk_grpc.mission import MissionItem, MissionError
+from mavsdk_grpc.action import OrbitYawBehavior
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 import numpy as np

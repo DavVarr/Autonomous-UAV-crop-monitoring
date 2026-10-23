@@ -4,8 +4,8 @@ from math import cos, radians, sin
 import cv2
 import numpy as np
 import ruckig
-from mavsdk import System
-from mavsdk.offboard import AccelerationNed, PositionNedYaw, VelocityNedYaw
+from mavsdk_grpc import System
+from mavsdk_grpc.offboard import AccelerationNed, PositionNedYaw, VelocityNedYaw
 
 import fc_simulated as fc
 import utilities_simulated as utilities

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from mavsdk.mocap import AngleBody, Covariance, PositionBody, VisionPositionEstimate
+from mavsdk_grpc.mocap import AngleBody, Covariance, PositionBody, VisionPositionEstimate
 
 import fc_simulated as fc
 from camera_simulated import my_estimatePoseSingleMarkers

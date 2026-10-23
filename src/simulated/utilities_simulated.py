@@ -1,13 +1,13 @@
 import asyncio
 import ruckig
 import time
-from mavsdk.telemetry import PositionNed, Position
-from mavsdk.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed
+from mavsdk_grpc.telemetry import PositionNed, Position
+from mavsdk_grpc.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed
 from camera_simulated import checkArucoPresence, Video
 from math import fabs, degrees, radians, pi, cos, sin, sqrt, atan2, asin
 import numpy as np
 import fc_simulated as fc
-from mavsdk import System
+from mavsdk_grpc import System
 
 def sign(num):
     if num == 0: return 0

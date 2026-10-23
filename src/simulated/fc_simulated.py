@@ -1,7 +1,7 @@
-from mavsdk import System
-from mavsdk.telemetry import Position, PositionNed, FlightMode, Battery, PositionVelocityNed, EulerAngle
-from mavsdk.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed, VelocityBodyYawspeed, PositionGlobalYaw
-from mavsdk.mission import MissionItem, MissionProgress
+from mavsdk_grpc import System
+from mavsdk_grpc.telemetry import Position, PositionNed, FlightMode, Battery, PositionVelocityNed, EulerAngle
+from mavsdk_grpc.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed, VelocityBodyYawspeed, PositionGlobalYaw
+from mavsdk_grpc.mission import MissionItem, MissionProgress
 from math import radians, cos, fabs, sqrt
 
 import numpy as np

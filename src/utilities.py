@@ -1,10 +1,10 @@
-from mavsdk.telemetry import PositionNed, Position
-from mavsdk.offboard import PositionNedYaw
+from mavsdk_grpc.telemetry import PositionNed, Position
+from mavsdk_grpc.offboard import PositionNedYaw
 from camera import checkArucoPresenceFromImage
 from math import fabs, degrees, radians, pi, cos, sin, sqrt, atan2, asin
 import numpy as np
 import fc
-from mavsdk import System
+from mavsdk_grpc import System
 import cv2.aruco as aruco
 from picamera2 import Picamera2
 
