@@ -7,9 +7,9 @@ import ruckig
 from mavsdk_grpc import System
 from mavsdk_grpc.offboard import AccelerationNed, PositionNedYaw, VelocityNedYaw
 
-import fc_simulated as fc
-import utilities_simulated as utilities
-from camera_simulated import my_estimatePoseSingleMarkers
+import simulated.fc_simulated as fc
+import simulated.utilities_simulated as utilities
+from simulated.camera_simulated import my_estimatePoseSingleMarkers
 
 G = 9.81
 CAMERA_TO_BODY = np.array([[0., -1., 0.], [1., 0., 0.], [0., 0., 1.]])

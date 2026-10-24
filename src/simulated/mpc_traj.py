@@ -22,8 +22,8 @@ import ruckig
 from mavsdk_grpc import System
 from mavsdk_grpc.offboard import AccelerationNed, PositionNedYaw, VelocityNedYaw
 
-import fc_simulated as fc
-from camera_simulated import Video, my_estimatePoseSingleMarkers
+import simulated.fc_simulated as fc
+from simulated.camera_simulated import Video, my_estimatePoseSingleMarkers
 
 
 G = 9.81

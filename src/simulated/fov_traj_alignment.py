@@ -8,9 +8,9 @@ import ruckig
 from mavsdk_grpc import System
 from mavsdk_grpc.offboard import AccelerationNed, PositionNedYaw, VelocityNedYaw
 
-import fc_simulated as fc
-import utilities_simulated as utilities
-from VisualOdometry import VisualOdometry
+import simulated.fc_simulated as fc
+import simulated.utilities_simulated as utilities
+from simulated.VisualOdometry import VisualOdometry
 
 G = 9.81
 

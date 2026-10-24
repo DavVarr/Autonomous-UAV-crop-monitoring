@@ -3,10 +3,10 @@ import ruckig
 import time
 from mavsdk_grpc.telemetry import PositionNed, Position
 from mavsdk_grpc.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed
-from camera_simulated import checkArucoPresence, Video
+from simulated.camera_simulated import checkArucoPresence, Video
 from math import fabs, degrees, radians, pi, cos, sin, sqrt, atan2, asin
 import numpy as np
-import fc_simulated as fc
+import simulated.fc_simulated as fc
 from mavsdk_grpc import System
 
 def sign(num):

@@ -1,7 +1,12 @@
 import asyncio
 import time
 import logging
+import os
+import sys
 from math import fabs, pi, sin, cos
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from mavsdk_grpc import System
 from mavsdk_grpc.offboard import VelocityNedYaw, OffboardError, PositionNedYaw, PositionGlobalYaw
 from mavsdk_grpc.mission import MissionItem, MissionPlan, MissionError
@@ -10,18 +15,18 @@ from mavsdk_grpc.telemetry import Position
 import numpy as np
 import cv2.aruco as aruco
 
-from camera_simulated import Video
+from simulated.camera_simulated import Video
 #from mpc import ArucoTrackingMPC, align_to_aruco_mpc
-from mpc_traj import CasadiArucoTrajectoryPlanner, align_to_aruco_casadi
-from vs_hybrid_alignment import align_to_aruco_visual_hybrid
-from fov_traj_alignment import align_to_aruco_ruckig_adaptive
-import utilities_simulated as utilities
-import fc_simulated as fc
+from simulated.mpc_traj import CasadiArucoTrajectoryPlanner, align_to_aruco_casadi
+from simulated.vs_hybrid_alignment import align_to_aruco_visual_hybrid
+from simulated.fov_traj_alignment import align_to_aruco_ruckig_adaptive
+import simulated.utilities_simulated as utilities
+import simulated.fc_simulated as fc
 import threading
 import cv2
 from contextlib import suppress
 from mavsdk_grpc.failure import FailureUnit, FailureType
-from VisualOdometry import VisualOdometry
+from simulated.VisualOdometry import VisualOdometry
 def display_thread_fn(video: Video, stop_event: threading.Event):
     while not stop_event.is_set():
         if video.frame_available():
