@@ -5,6 +5,8 @@ import numpy as np
 from PIL import Image
 from pathlib import Path
 
+from aruco_pose import checkArucoPresence, my_estimatePoseSingleMarkers
+
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
 
@@ -137,79 +139,6 @@ class Video():
         return Gst.FlowReturn.OK
     
 
-def my_estimatePoseSingleMarkers(corners, marker_size, mtx, distortion):
-    '''
-    This will estimate the rvec and tvec for each of the marker corners detected by:
-       corners, ids, rejectedImgPoints = detector.detectMarkers(image)
-    corners - is an array of detected corners for each detected marker in the image
-    marker_size - is the size of the detected markers
-    mtx - is the camera matrix
-    distortion - is the camera distortion matrix
-    RETURN list of rvecs, tvecs, and trash (so that it corresponds to the old estimatePoseSingleMarkers())
-    '''
-
-    # The points origin is centered in the top left corner, and must be defined accordingly
-    marker_corner_points = np.array([
-        [0, 0, 0],                # Top left corner
-        [marker_size, 0, 0],            # Top right corner
-        [marker_size, marker_size, 0],       # Bottom right corner
-        [0, marker_size, 0]            # Bottom left corner
-    ], dtype=np.float32)
-
-    marker_center_points = np.array([
-        [-marker_size / 2, -marker_size / 2, 0],              # Top left corner
-        [marker_size / 2, -marker_size / 2, 0],           # Top right corner
-        [marker_size / 2, marker_size / 2, 0],       # Bottom right corner
-        [-marker_size / 2, marker_size / 2, 0]           # Bottom left corner
-    ], dtype=np.float32)
-
-    trash = []
-    rvecs = []
-    tvecs = []
-    
-    for c in corners:
-        nada, R, t = cv2.solvePnP(marker_center_points, c, mtx, distortion, True, cv2.SOLVEPNP_IPPE_SQUARE)
-        rvecs.append(R)
-        tvecs.append(t)
-        trash.append(nada)
-        
-        #Rt = cv2.Rodrigues(R)
-        #print(f"R: {R}")
-        #print(f"Rt: {Rt}")
-
-        """roll = degrees(atan2(-Rt[2][1], Rt[2][2]))
-        pitch = degrees(asin(Rt[2][0]))
-        yaw = degrees(atan2(-Rt[1][0], Rt[0][0]))
-        print(f"Roll Calculated: {roll}")
-        print(f"Pitch Calculated: {pitch}")
-        print(f"Yaw Calculated: {yaw}")
-
-    forward_distance = - tvecs[0][1][0]
-    right_distance = tvecs[0][0][0]
-    vertical_distance = tvecs[0][2][0]
-
-    print(f"forward_distance: {forward_distance}, right_distance: {right_distance}, vertical_distance: {vertical_distance}")"""
-    return rvecs, tvecs, trash
-
-def checkArucoPresence(video: Video, detector, mtx, dist, marker_size=0.5):
-    while True:
-        if not video.frame_available():
-            continue
-
-        original_frame = video.frame()
-        frame = original_frame.copy()
-        frame.setflags(True)
-
-        markerCorners, markerIds, rejectedCandidates = detector.detectMarkers(frame)
-
-        #cv2.imshow("Drone View", frame)
-        #cv2.waitKey(1) 
-        if not markerIds is None:
-            return my_estimatePoseSingleMarkers(markerCorners, marker_size, mtx, dist)
-        else:
-            return None
-
-    
 # Function to test a real aruco pad
 def aruco_pad_test():
     ARUCO_DETECTOR_THRESHOLD_WINDOW_MIN = 15

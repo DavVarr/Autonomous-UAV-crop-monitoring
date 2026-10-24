@@ -3,7 +3,7 @@ import ruckig
 import time
 from mavsdk_grpc.telemetry import PositionNed, Position
 from mavsdk_grpc.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed
-from simulated.camera_simulated import checkArucoPresence, Video
+from aruco_pose import VideoSource, checkArucoPresence
 from math import fabs, degrees, radians, pi, cos, sin, sqrt, atan2, asin
 import numpy as np
 import simulated.fc_simulated as fc
@@ -13,7 +13,7 @@ def sign(num):
     if num == 0: return 0
     return -1 if num < 0 else 1
 
-def look_for_aruco(video: Video, detector, mtx, dist, marker_size=0.5):
+def look_for_aruco(video: VideoSource, detector, mtx, dist, marker_size=0.5):
     for i in range(10):
         result = checkArucoPresence(video, detector, mtx, dist, marker_size)
         if not result is None:
@@ -88,7 +88,7 @@ def get_aruco_distances_and_yaw(rvecs, tvecs) -> list[float] | None:
     ]
 
 
-def detect_aruco_distances_and_yaw(video: Video, detector, mtx, dist, marker_size=0.5):
+def detect_aruco_distances_and_yaw(video: VideoSource, detector, mtx, dist, marker_size=0.5):
     """Legacy convenience wrapper for older alignment/search functions.
 
     New code should detect once and call ``get_aruco_distances_and_yaw`` with
@@ -168,7 +168,7 @@ def normalize_heading(heading: float):
     else: return heading
 
 
-async def look_for_aruco_orbit(drone : System, video : Video, detector, mtx, dist,
+async def look_for_aruco_orbit(drone : System, video : VideoSource, detector, mtx, dist,
                          center_ned : PositionNed, heading, radius, speed, marker_size=0.5):
     omega = speed / radius
     accumulated_angle = 0.0

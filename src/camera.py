@@ -6,6 +6,9 @@ from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 from time import perf_counter, sleep
 
+from aruco_pose import my_estimatePoseSingleMarkers
+
+
 class Video():
     def __init__(self, camera: Picamera2):
         self.camera = camera
@@ -18,35 +21,6 @@ class Video():
 
     def frame_available(self):
         return True
-
-def my_estimatePoseSingleMarkers(corners, marker_size, mtx, distortion):
-    '''
-    This will estimate the rvec and tvec for each of the marker corners detected by:
-       corners, ids, rejectedImgPoints = detector.detectMarkers(image)
-    corners - is an array of detected corners for each detected marker in the image
-    marker_size - is the size of the detected markers
-    mtx - is the camera matrix
-    distortion - is the camera distortion matrix
-    RETURN list of rvecs, tvecs, and trash (so that it corresponds to the old estimatePoseSingleMarkers())
-    '''
-    marker_center_points = np.array([
-        [-marker_size / 2, -marker_size / 2, 0],              # Top left corner
-        [marker_size / 2, -marker_size / 2, 0],           # Top right corner
-        [marker_size / 2, marker_size / 2, 0],       # Bottom right corner
-        [-marker_size / 2, marker_size / 2, 0]           # Bottom left corner
-    ], dtype=np.float32)
-
-    trash = []
-    rvecs = []
-    tvecs = []
-    
-    for c in corners:
-        nada, R, t = cv2.solvePnP(marker_center_points, c, mtx, distortion, True, cv2.SOLVEPNP_IPPE_SQUARE)
-        rvecs.append(R)
-        tvecs.append(t)
-        trash.append(nada)
-
-    return rvecs, tvecs, trash
 
 def checkArucoPresenceFromImage(camera: Picamera2, detector, mtx, dist):
     request = camera.capture_request()
