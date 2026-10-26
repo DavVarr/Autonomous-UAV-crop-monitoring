@@ -44,6 +44,7 @@ class VisualOdometry:
 
         self._R_ned_marker = self._p_ned_marker = None
         self._latest = None
+        self._last_corners = None
 
         self._ready = asyncio.Event()
         self._fusion_enabled = False
@@ -94,26 +95,51 @@ class VisualOdometry:
         return self._p_ned_marker + (self._R_ned_marker @ corners.T).T
 
     def _detect(self, frame, timestamp):
-        corners, ids, _ = self.detector.detectMarkers(frame)
-        if ids is None:
+        height, width = frame.shape[:2]
+        regions = []
+        if self._last_corners is not None:
+            minimum = self._last_corners.min(axis=0)
+            maximum = self._last_corners.max(axis=0)
+            margin = np.maximum(maximum - minimum, 32) * 2
+            x0 = max(0, int(np.floor(minimum[0] - margin[0])))
+            y0 = max(0, int(np.floor(minimum[1] - margin[1])))
+            x1 = min(width, int(np.ceil(maximum[0] + margin[0])))
+            y1 = min(height, int(np.ceil(maximum[1] + margin[1])))
+            if x0 > 0 or y0 > 0 or x1 < width or y1 < height:
+                regions.append((frame[y0:y1, x0:x1], x0, y0))
+        regions.append((frame, 0, 0))
+
+        corner = None
+        for region, offset_x, offset_y in regions:
+            corners, ids, _ = self.detector.detectMarkers(region)
+            if ids is None:
+                continue
+
+            ids = np.asarray(ids).ravel()
+            if not len(ids):
+                continue
+            if self.marker_id is None:
+                i = 0
+            else:
+                matches = np.flatnonzero(ids == self.marker_id)
+                if not len(matches):
+                    continue
+                i = int(matches[0])
+
+            corner = np.asarray(corners[i]).reshape(4, 2).copy()
+            corner += (offset_x, offset_y)
+            break
+
+        if corner is None:
             return None
 
-        ids = np.asarray(ids).ravel()
-        if self.marker_id is None:
-            i = 0
-        else:
-            matches = np.flatnonzero(ids == self.marker_id)
-            if not len(matches):
-                return None
-            i = int(matches[0])
-
-        corner = corners[i]
         rvecs, tvecs, _ = my_estimatePoseSingleMarkers(
             [corner], self.marker_size, self.mtx, self.dist
         )
+        self._last_corners = corner.copy()
 
         return ArucoObservation(
-            np.asarray(corner).reshape(4, 2).copy(),
+            corner,
             np.asarray(rvecs[0], float).reshape(3),
             np.asarray(tvecs[0], float).reshape(3),
             timestamp,
