@@ -4,6 +4,17 @@ import cv2
 import numpy as np
 
 
+def scale_intrinsic_matrix(mtx, calibration_resolution, output_resolution):
+    calibration_width, calibration_height = calibration_resolution
+    output_width, output_height = output_resolution
+    scaled_mtx = np.asarray(mtx, dtype=float).copy()
+    scaled_mtx[0, 0] *= output_width / calibration_width
+    scaled_mtx[0, 2] *= output_width / calibration_width
+    scaled_mtx[1, 1] *= output_height / calibration_height
+    scaled_mtx[1, 2] *= output_height / calibration_height
+    return scaled_mtx
+
+
 class VideoSource(Protocol):
     def frame_available(self) -> bool: ...
 

@@ -15,6 +15,7 @@ import cv2.aruco as aruco
 from contextlib import suppress
 
 import camera as camera_module
+from aruco_pose import scale_intrinsic_matrix
 import simulated.fc_simulated as fc
 import simulated.utilities_simulated as utilities
 from simulated.fov_traj_alignment import align_to_aruco_ruckig_adaptive
@@ -75,13 +76,17 @@ async def run():
     # Preparing camera
     camera = Picamera2()
     frame_width, frame_height = config["camera"]["resolution"]
-    main_stream = {"size": (frame_width, frame_height)}
-    lores_stream = {"size": (frame_width, frame_height)}
+    main_stream = {"size": (frame_width, frame_height), "format": "YUV420"}
+    lores_stream = {"size": (frame_width, frame_height), "format": "YUV420"}
     video_config = camera.create_video_configuration(main_stream, lores_stream, encode="lores")
     camera.configure(video_config)
     encoder = H264Encoder(10000000)
 
-    mtx = np.array(config["camera"]["intrinsic_matrix"])
+    mtx = scale_intrinsic_matrix(
+        config["camera"]["intrinsic_matrix"],
+        config["camera"]["calibration_resolution"],
+        config["camera"]["resolution"],
+    )
     dist = np.array(config["camera"]["distortion_coefficients"])
     camera_to_body = np.array(config["camera"]["camera_to_body"])
     camera_position_body = np.array(config["camera"]["camera_position_body"])
@@ -333,7 +338,7 @@ def buildArucoDetector():
     arucoParams.adaptiveThreshWinSizeMax = ARUCO_DETECTOR_THRESHOLD_WINDOW_MAX
     arucoParams.adaptiveThreshWinSizeMin = ARUCO_DETECTOR_THRESHOLD_WINDOW_MIN
     arucoParams.adaptiveThreshWinSizeStep = ARUCO_DETECTOR_THRESHOLD_WINDOW_STEP
-    # The marker side is 50 pixels at 8 meters of distance, so 170 pixels (safety margin) divided by 1640
+    # The minimum perimeter is relative to the longest image dimension.
     arucoParams.minMarkerPerimeterRate = ARUCO_DETECTOR_MIN_MARKER_PERIMETER_RATE
     
     return aruco.ArucoDetector(arucoDict, arucoParams)

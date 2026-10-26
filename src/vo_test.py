@@ -14,6 +14,7 @@ from mavsdk_grpc import System
 from picamera2 import Picamera2
 
 import camera as camera_module
+from aruco_pose import scale_intrinsic_matrix
 import simulated.fc_simulated as fc
 from simulated.VisualOdometry import VisualOdometry
 
@@ -71,13 +72,18 @@ async def main():
     w, h = config["camera"]["resolution"]
     camera = Picamera2()
     camera.configure(camera.create_video_configuration(
-        {"size": (w, h)}, {"size": (w, h)}))
+        {"size": (w, h), "format": "YUV420"},
+        {"size": (w, h), "format": "YUV420"}))
     camera.start()
     video = camera_module.Video(camera)
 
     vision = CountingVO(
         video, build_detector(),
-        np.array(config["camera"]["intrinsic_matrix"]),
+        scale_intrinsic_matrix(
+            config["camera"]["intrinsic_matrix"],
+            config["camera"]["calibration_resolution"],
+            config["camera"]["resolution"],
+        ),
         np.array(config["camera"]["distortion_coefficients"]),
         marker_size=config["aruco_size"], marker_id=None,
         camera_to_body=np.array(config["camera"]["camera_to_body"]),

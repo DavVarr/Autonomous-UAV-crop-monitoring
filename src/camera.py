@@ -15,7 +15,7 @@ class Video():
 
     def frame(self):
         request = self.camera.capture_request()
-        frame = request.make_array("main")
+        frame = _main_frame(self.camera, request)
         request.release()
         return frame
 
@@ -24,7 +24,7 @@ class Video():
 
 def checkArucoPresenceFromImage(camera: Picamera2, detector, mtx, dist):
     request = camera.capture_request()
-    image = request.make_array("main")
+    image = _main_frame(camera, request)
     request.release()
 
     markerCorners, markerIds, rejectedCandidates = detector.detectMarkers(image)
@@ -33,6 +33,14 @@ def checkArucoPresenceFromImage(camera: Picamera2, detector, mtx, dist):
         return my_estimatePoseSingleMarkers(markerCorners, 0.25, mtx, dist)
     else:
         return None
+
+
+def _main_frame(camera: Picamera2, request):
+    frame = request.make_array("main")
+    main_config = camera.camera_configuration()["main"]
+    if main_config["format"] == "YUV420":
+        return frame[:main_config["size"][1], :]
+    return frame
 
 def cameraTest():
     ARUCO_DETECTOR_THRESHOLD_WINDOW_MIN = 15

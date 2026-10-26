@@ -2,7 +2,8 @@
   "system_address": "serial:///dev/serial0:57600",
   "waypoints": [],
   "camera": {
-    "resolution": [1640, 1232],
+    "resolution": [800, 600],
+    "calibration_resolution": [1640, 1232],
     "intrinsic_matrix": [
       [1297.0, 0.0, 817.0],
       [0.0, 1297.0, 610.1],
