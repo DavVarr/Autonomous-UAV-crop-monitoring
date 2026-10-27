@@ -18,7 +18,7 @@ import numpy as np
 try:
     import camera as camera_module
     from simulated.VisualOdometry import VisualOdometry
-    from mavsdk.mocap import VisionPositionEstimate
+    from mavsdk_grpc.mocap import VisionPositionEstimate
     HAVE_FLIGHT = True
 except ImportError:          # analysis on a laptop: recording classes unavailable
     HAVE_FLIGHT = False
