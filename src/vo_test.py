@@ -17,7 +17,7 @@ import camera as camera_module
 from aruco_pose import scale_intrinsic_matrix
 import simulated.fc_simulated as fc
 from simulated.VisualOdometry import VisualOdometry
-
+from ev_delay_test import TimedVideo, DelayProbeVO
 PRINT_PERIOD = 1.0
 
 
@@ -75,9 +75,9 @@ async def main():
         {"size": (w, h), "format": "YUV420"},
         {"size": (w, h), "format": "YUV420"}))
     camera.start()
-    video = camera_module.Video(camera)
+    video = TimedVideo(camera)  #camera_module.Video(camera)
 
-    vision = CountingVO(
+    vision = DelayProbeVO(
         video, build_detector(),
         scale_intrinsic_matrix(
             config["camera"]["intrinsic_matrix"],
@@ -88,6 +88,7 @@ async def main():
         marker_size=config["aruco_size"], marker_id=None,
         camera_to_body=np.array(config["camera"]["camera_to_body"]),
         camera_position_body=np.array(config["camera"]["camera_position_body"]),
+        probe_csv="probe.scv"
     )
     vision_task = asyncio.create_task(vision.run(drone))
 
@@ -132,6 +133,7 @@ async def main():
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
+        vision.close_probe()
         vision.disable_fusion()
         vision_task.cancel()
         with suppress(asyncio.CancelledError):
