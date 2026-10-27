@@ -1,12 +1,12 @@
-# ev_delay_probe.py
+# ev_delay_test.py
 """
 Estimate EKF2_EV_DELAY for the ArUco visual odometry.
 
 Recording (on the Pi, inside your real code):
-    from ev_delay_probe import TimedVideo, DelayProbeVO
+    from ev_delay_test import TimedVideo, DelayProbeVO
 Analysis (Pi or laptop; the ulog part needs `pip install pyulog`):
-    python3 ev_delay_probe.py csv probe.csv
-    python3 ev_delay_probe.py ulog flight.ulg --csv probe.csv
+    python3 ev_delay_test.py csv probe.csv
+    python3 ev_delay_test.py ulog flight.ulg --csv probe.csv
 """
 import argparse
 import csv
@@ -71,6 +71,8 @@ if HAVE_FLIGHT:
                               "post_ms", "total_ms"])
             self._cur = None
             self._n = 0
+            self.sent_count = 0
+            self.last_sent = None
 
         # _detect runs in a worker thread, but run() awaits it before grabbing
         # the next frame, so video.capture_ns still belongs to this frame.
@@ -85,22 +87,23 @@ if HAVE_FLIGHT:
 
         def _vpe(self, position, R):
             msg = super()._vpe(position, R)
-            if self._cur is None:
-                return msg
-            t_cap, t0, t1 = self._cur
-            t_send = time.clock_gettime_ns(self.video.clock_id)
-            self._w.writerow([self._n, f"{t_cap / 1e9:.6f}",
-                              f"{(t0 - t_cap) / 1e6:.2f}",    # capture -> detect start
-                              f"{(t1 - t0) / 1e6:.2f}",       # detection (+pose)
-                              f"{(t_send - t1) / 1e6:.2f}",   # attitude query etc. -> send
-                              f"{(t_send - t_cap) / 1e6:.2f}"])
-            self._n += 1
-            if self._n % 10 == 0:
-                self._f.flush()
-            if self._send_usec:
-                msg = VisionPositionEstimate(
-                    t_cap // 1000, msg.position_body, msg.angle_body,
-                    msg.pose_covariance, msg.reset_counter)
+            if self._cur is not None:
+                t_cap, t0, t1 = self._cur
+                t_send = time.clock_gettime_ns(self.video.clock_id)
+                self._w.writerow([self._n, f"{t_cap / 1e9:.6f}",
+                                  f"{(t0 - t_cap) / 1e6:.2f}",    # capture -> detect start
+                                  f"{(t1 - t0) / 1e6:.2f}",       # detection (+pose)
+                                  f"{(t_send - t1) / 1e6:.2f}",   # attitude query etc. -> send
+                                  f"{(t_send - t_cap) / 1e6:.2f}"])
+                self._n += 1
+                if self._n % 10 == 0:
+                    self._f.flush()
+                if self._send_usec:
+                    msg = VisionPositionEstimate(
+                        t_cap // 1000, msg.position_body, msg.angle_body,
+                        msg.pose_covariance, msg.reset_counter)
+            self.sent_count += 1
+            self.last_sent = msg
             return msg
 
         def close_probe(self):

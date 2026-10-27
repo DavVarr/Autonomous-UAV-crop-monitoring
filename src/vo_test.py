@@ -13,25 +13,10 @@ import numpy as np
 from mavsdk_grpc import System
 from picamera2 import Picamera2
 
-import camera as camera_module
 from aruco_pose import scale_intrinsic_matrix
 import simulated.fc_simulated as fc
-from simulated.VisualOdometry import VisualOdometry
 from ev_delay_test import TimedVideo, DelayProbeVO
 PRINT_PERIOD = 1.0
-
-
-class CountingVO(VisualOdometry):
-    """Same as VisualOdometry, but remembers what it sends to PX4."""
-
-    sent_count = 0
-    last_sent = None
-
-    def _vpe(self, position, R):
-        msg = super()._vpe(position, R)
-        self.sent_count += 1
-        self.last_sent = msg
-        return msg
 
 
 def build_detector():
@@ -75,7 +60,7 @@ async def main():
         {"size": (w, h), "format": "YUV420"},
         {"size": (w, h), "format": "YUV420"}))
     camera.start()
-    video = TimedVideo(camera)  #camera_module.Video(camera)
+    video = TimedVideo(camera)
 
     vision = DelayProbeVO(
         video, build_detector(),
@@ -88,7 +73,7 @@ async def main():
         marker_size=config["aruco_size"], marker_id=None,
         camera_to_body=np.array(config["camera"]["camera_to_body"]),
         camera_position_body=np.array(config["camera"]["camera_position_body"]),
-        probe_csv="probe.scv"
+        probe_csv="probe.csv"
     )
     vision_task = asyncio.create_task(vision.run(drone))
 
