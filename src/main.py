@@ -77,8 +77,7 @@ async def run():
     camera = Picamera2()
     frame_width, frame_height = config["camera"]["resolution"]
     main_stream = {"size": (frame_width, frame_height), "format": "YUV420"}
-    lores_stream = {"size": (frame_width, frame_height), "format": "YUV420"}
-    video_config = camera.create_video_configuration(main_stream, lores_stream, encode="lores")
+    video_config = camera.create_video_configuration(main_stream, encode="main")
     camera.configure(video_config)
     encoder = H264Encoder(10000000)
 
@@ -101,9 +100,14 @@ async def run():
     logging.info("Arming and taking off")
     await drone.action.arm()
     await asyncio.sleep(1)
-    await drone.offboard.set_position_ned(PositionNedYaw(
-        0,0,-TAKE_OFF_ALTITUDE,float('nan')
-    ))
+    takeoff_start = await fc.get_drone_ned_position(drone)
+    takeoff_target = PositionNedYaw(
+        takeoff_start.north_m,
+        takeoff_start.east_m,
+        takeoff_start.down_m - TAKE_OFF_ALTITUDE,
+        float("nan"),
+    )
+    await drone.offboard.set_position_ned(takeoff_target)
     try:
         await drone.offboard.start()
         print("-- Offboard engaged")
@@ -113,8 +117,8 @@ async def run():
         return
 
     while True:
-        pos = await fc.get_drone_global_position(drone)
-        if fabs(pos.relative_altitude_m - TAKE_OFF_ALTITUDE) <= 0.5:
+        pos = await fc.get_drone_ned_position(drone)
+        if fabs(pos.down_m - takeoff_target.down_m) <= 0.5:
             break
 
     for waypoint in config["waypoints"]:
@@ -125,7 +129,8 @@ async def run():
             waypoint["latitude"],
             waypoint["longitude"],
             waypoint["altitude"],
-            heading=waypoint["heading"]
+            heading=float("nan"),
+            max_velocity=5.0,
         )
         await asyncio.sleep(1)
 
@@ -230,9 +235,9 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
     vision.enable_frame_initialization()
     await vision.wait_frame_ready()
 
-    print("-- Disabling GPS position fusion")
-    await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
-    await utilities.wait_gps_ctrl(drone)
+    print("-- Disabling GPS horizontal position fusion")
+    await drone.param.set_param_int("EKF2_GPS_CTRL", 6)
+    await utilities.wait_gps_ctrl(drone, 6)
     vision.enable_fusion()
 
     operation_task = asyncio.create_task(align_ruckig_fov_safe(
