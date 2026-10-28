@@ -86,7 +86,7 @@ async def check_global_position_reached(current_position: Position, target_posit
     diff_lon = fabs(current_position.longitude_deg - target_position.longitude_deg) - TOLERANCE_DEG
     diff_alt = fabs(current_position.relative_altitude_m - target_position.relative_altitude_m) - TOLERANCE_M
     if diff_lat <= 0 and diff_lon <= 0 and diff_alt <= 0:
-        print("Position reached")
+        # print("Position reached")
         return True
     return False
 
@@ -128,7 +128,7 @@ async def set_local_speeds(forward: float, right: float, down: float, yaw: float
 
 async def move_locally(forward: float, right: float, down: float, yaw: float, drone: System):
     highest_value = max(abs(forward), abs(right), abs(down))
-    print(f"Forward: {forward}, Right: {right}, Down: {down}, Yaw: {yaw}, Highest: {highest_value}")
+    # print(f"Forward: {forward}, Right: {right}, Down: {down}, Yaw: {yaw}, Highest: {highest_value}")
     if highest_value == 0: return
 
     normalized_forward = forward/highest_value
@@ -216,7 +216,7 @@ async def fly_to_ned_smooth(drone: System,
     t1 = time.perf_counter()
     otg.calculate(inp, traj)
     t2 = time.perf_counter()
-    print(t2-t1)
+    # print(t2-t1)
     start_time = time.perf_counter()
     
     while True:
@@ -234,7 +234,7 @@ async def fly_to_ned_smooth(drone: System,
         )
         
         if t >= traj.duration:
-            print("Trajectory successfully completed!")
+            # print("Trajectory successfully completed!")
             break
     while True:
         pos_vel_reached = await check_ned_position_reached_with_velocity(
@@ -357,7 +357,7 @@ def make_position_smoother(trajectory, max_lag=0.25):
 
         # PX4-like trajectory time stretching.
         rate = 1.0 - np.clip(lag / max_lag, 0.0, 1.0)
-        if rate < 1: print(f"Trajectory follower lag: {lag:.3f} m, rate: {rate:.3f}")
+        # if rate < 1: print(f"Trajectory follower lag: {lag:.3f} m, rate: {rate:.3f}")
         virtual_time = min(
             virtual_time + dt * rate,
             trajectory.duration,

@@ -57,20 +57,20 @@ async def run():
         raise ValueError("At least one waypoint must be set in config.json")
 
     drone = System()
-    print("Connecting...")
+    # print("Connecting...")
     await drone.connect(system_address=config["system_address"])
 
-    print("Waiting for drone to connect...")
+    # print("Waiting for drone to connect...")
     async for state in drone.core.connection_state():
         if state.is_connected:
-            print(f"-- Connected to drone!")
+            # print(f"-- Connected to drone!")
             logging.info("Drone connection estabilished")
             break
 
-    print("Waiting for drone to have a global position estimate...")
+    # print("Waiting for drone to have a global position estimate...")
     async for health in drone.telemetry.health():
         if health.is_global_position_ok and health.is_home_position_ok:
-            print("-- Global position estimate OK")
+            # print("-- Global position estimate OK")
             break
 
     # Preparing camera
@@ -96,7 +96,7 @@ async def run():
 
     camera.start_recording(encoder, 'video.h264')
     video = camera_module.Video(camera)
-    print("-- Arming")
+    # print("-- Arming")
     logging.info("Arming and taking off")
     await drone.action.arm()
     await asyncio.sleep(1)
@@ -110,9 +110,9 @@ async def run():
     await drone.offboard.set_position_ned(takeoff_target)
     try:
         await drone.offboard.start()
-        print("-- Offboard engaged")
+        # print("-- Offboard engaged")
     except OffboardError as e:
-        print(f"Offboard start failed: {e._result.result}")
+        # print(f"Offboard start failed: {e._result.result}")
         await drone.action.return_to_launch()
         return
 
@@ -122,7 +122,7 @@ async def run():
             break
 
     for waypoint in config["waypoints"]:
-        print(f"Flying to waypoint {waypoint['latitude']}, {waypoint['longitude']}")
+        # print(f"Flying to waypoint {waypoint['latitude']}, {waypoint['longitude']}")
         logging.info(f"Flying to waypoint {waypoint['latitude']}, {waypoint['longitude']}")
         await fc.fly_to_global(
             drone,
@@ -142,7 +142,7 @@ async def run():
                 break
 
         if not arucoFound is None:
-            print("Aruco located!")
+            # print("Aruco located!")
             vision = VisualOdometry(
                 video, detector, mtx, dist, marker_size=marker_size, marker_id=None,
                 camera_to_body=camera_to_body, camera_position_body=camera_position_body)
@@ -151,19 +151,19 @@ async def run():
             result = await align_noGPS_with_failsafe(
                 drone, vision, transition_task, frame_width, frame_height)
 
-            if result is False:
-                print("Aruco alignment failed!")
-            else:
-                print("Aruco alignment completed!")
+            # if result is False:
+            #     print("Aruco alignment failed!")
+            # else:
+            #     print("Aruco alignment completed!")
 
             vision_task.cancel()
             with suppress(asyncio.CancelledError):
                 await vision_task
 
-        else:
-            print("Aruco not found, going to next waypoint")
+        # else:
+        #     print("Aruco not found, going to next waypoint")
 
-    print("Mission completed! Return to home")
+    # print("Mission completed! Return to home")
     logging.info(f"Mission completed, return to home")
     await drone.offboard.stop()
     await drone.action.return_to_launch()
@@ -235,7 +235,7 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
     vision.enable_frame_initialization()
     await vision.wait_frame_ready()
 
-    print("-- Disabling GPS horizontal position fusion")
+    # print("-- Disabling GPS horizontal position fusion")
     await drone.param.set_param_int("EKF2_GPS_CTRL", 6)
     await utilities.wait_gps_ctrl(drone, 6)
     vision.enable_fusion()
@@ -251,7 +251,7 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
     )
 
     if loss_task in done:
-        print("-- ArUco lost for 2 seconds, aborting")
+        # print("-- ArUco lost for 2 seconds, aborting")
 
         operation_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -259,10 +259,10 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
 
         vision.disable_fusion()
 
-        print("-- Restoring GPS fusion")
+        # print("-- Restoring GPS fusion")
         await drone.param.set_param_int("EKF2_GPS_CTRL", gps_ctrl)
 
-        print("-- Recovering altitude using GPS")
+        # print("-- Recovering altitude using GPS")
         pos = await fc.get_drone_ned_position(drone)
         await fc.fly_to_ned_smooth(
             drone, PositionNedYaw(pos.north_m, pos.east_m, return_down,float("nan")), velocity_threshold=0.3, max_jerk=4
@@ -271,7 +271,7 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
 
     success = await operation_task
 
-    print("-- Restoring GPS fusion")
+    # print("-- Restoring GPS fusion")
     await drone.param.set_param_int(
         "EKF2_GPS_CTRL", gps_ctrl
     )
@@ -290,7 +290,7 @@ async def align_ruckig_fov_safe(drone,vision,initial_state,return_down,frame_wid
     if not success:
         return False
     await asyncio.sleep(5)
-    print("-- Alignment complete, returning to altitude")
+    # print("-- Alignment complete, returning to altitude")
     pos = await fc.get_drone_ned_position(drone)
     await fc.fly_to_ned_smooth(
         drone, PositionNedYaw(pos.north_m, pos.east_m, return_down, float("nan")), velocity_threshold=0.3, max_jerk=4
@@ -298,7 +298,7 @@ async def align_ruckig_fov_safe(drone,vision,initial_state,return_down,frame_wid
     return True
 
 async def aruco_search(drone: System, video: camera_module.Video, detector, mtx, dist, marker_size):
-    print("Starting aruco search")
+    # print("Starting aruco search")
     battery = await fc.get_drone_remaining_battery(drone)
     logging.info(f"Started aruco search with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
     round = 1
@@ -313,7 +313,7 @@ async def aruco_search(drone: System, video: camera_module.Video, detector, mtx,
 
         radius = ARUCO_SEARCH_RADIUS_MULTIPLIER * round
 
-        print("Starting orbit")
+        # print("Starting orbit")
 
         result, transition_task = await utilities.look_for_aruco_orbit(
             drone, video, detector, mtx, dist,
@@ -330,7 +330,7 @@ async def aruco_search(drone: System, video: camera_module.Video, detector, mtx,
         heading
     )
     await fc.fly_to_ned(drone, center_ned_yaw, 0.5)
-    print("Aruco search failed, awaiting the drone to navigate to the initial position")
+    # print("Aruco search failed, awaiting the drone to navigate to the initial position")
     await asyncio.sleep(5)
     return None, None
 
