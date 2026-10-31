@@ -197,7 +197,7 @@ class VisualOdometry:
         last_frame = None
 
         while True:
-            frame = self.video.frame()
+            frame = await asyncio.to_thread(self.video.frame)
             if frame is None or frame is last_frame:
                 await asyncio.sleep(0.005)
                 continue
