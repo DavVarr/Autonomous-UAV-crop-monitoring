@@ -277,6 +277,7 @@ async def align_to_aruco_ruckig_adaptive(
             VelocityNedYaw(*map(float, v), heading),
             AccelerationNed(*map(float, a)),
         )
+        await asyncio.sleep(0.02)
     #print("phase2")
     start = time.perf_counter()
     while True:
@@ -290,6 +291,7 @@ async def align_to_aruco_ruckig_adaptive(
         )
         if elapsed > trajectory.duration:
             break
+        await asyncio.sleep(0.02)
 
 
     marker_forward = marker_corners_ned[0] - marker_corners_ned[3]
@@ -327,3 +329,4 @@ async def align_to_aruco_ruckig_adaptive(
 
         if abs(actual_error) < tolerance and abs(error) < tolerance:
             return True
+        await asyncio.sleep(0.02)

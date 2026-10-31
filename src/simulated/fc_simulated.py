@@ -236,6 +236,7 @@ async def fly_to_ned_smooth(drone: System,
         if t >= traj.duration:
             # print("Trajectory successfully completed!")
             break
+        await asyncio.sleep(0.02)
     while True:
         pos_vel_reached = await check_ned_position_reached_with_velocity(
             drone, PositionNedYaw(*inp.target_position, float("nan")), tolerance=threshold, velocity_threshold=velocity_threshold)

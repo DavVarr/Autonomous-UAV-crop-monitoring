@@ -237,6 +237,7 @@ async def look_for_aruco_orbit(drone : System, video : VideoSource, detector, mt
             transition_task.target_xy = np.array([target_ned.north_m,target_ned.east_m])
             #await asyncio.sleep(0.5)
             return result,transition_task
+        await asyncio.sleep(0.02)
 
     return None, None # completed full orbit without finding aruco
 
@@ -279,6 +280,7 @@ async def _smooth_move_to_target(drone, target, heading, acceleration,
         )
         if elapsed >= trajectory.duration:
             return
+        await asyncio.sleep(0.02)
         
 
 async def wait_gps_ctrl(drone, value=4, timeout=2.0):
