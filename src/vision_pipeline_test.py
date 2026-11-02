@@ -133,7 +133,9 @@ class FixedPoseTelemetry:
         yield self._position_velocity
 
     async def attitude_euler(self):
-        yield self._attitude
+        while True:
+            yield self._attitude
+            await asyncio.sleep(0.02)
 
 
 class FixedPoseDrone:

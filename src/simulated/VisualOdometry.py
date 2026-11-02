@@ -1,6 +1,7 @@
 import asyncio
 import time
 from dataclasses import dataclass
+from contextlib import suppress
 
 import cv2
 import numpy as np
@@ -45,6 +46,10 @@ class VisualOdometry:
         self._R_ned_marker = self._p_ned_marker = None
         self._latest = None
         self._last_corners = None
+        self._attitude = None
+        self._attitude_received_at = 0.0
+        self._attitude_ready = asyncio.Event()
+        self._attitude_task = None
 
         self._ready = asyncio.Event()
         self._fusion_enabled = False
@@ -157,10 +162,10 @@ class VisualOdometry:
         return p_body_marker, R_body_marker
 
     async def _initialize_frame(self, drone, obs):
-        pv, attitude = await asyncio.gather(
-            fc.get_drone_ned_position_velocity(drone),
-            fc.get_drone_attitude_euler(drone),
-        )
+        pv = await fc.get_drone_ned_position_velocity(drone)
+        attitude = self.get_attitude()
+        if attitude is None:
+            return False
 
         p_ned_body = np.array([
             pv.position.north_m,
@@ -173,6 +178,7 @@ class VisualOdometry:
         # Fixed marker pose in the existing PX4 local-NED frame.
         self._R_ned_marker = R_ned_body @ R_body_marker
         self._p_ned_marker = p_ned_body + R_ned_body @ p_body_marker
+        return True
 
     def _local_body_pose(self, obs, attitude):
         p_body_marker, R_body_marker = self._marker_in_body(obs)
@@ -194,6 +200,33 @@ class VisualOdometry:
         )
 
     async def run(self, drone):
+        self._attitude_task = asyncio.create_task(self._cache_attitude(drone))
+        try:
+            await asyncio.wait_for(self._attitude_ready.wait(), 10.0)
+            await self._run(drone)
+        finally:
+            self._attitude_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._attitude_task
+
+    async def _cache_attitude(self, drone):
+        async for attitude in drone.telemetry.attitude_euler():
+            if (self._attitude is not None and getattr(attitude, "timestamp_us", 0)
+                    and attitude.timestamp_us <= getattr(self._attitude, "timestamp_us", 0)):
+                continue
+            self._attitude = attitude
+            self._attitude_received_at = time.perf_counter()
+            self._attitude_ready.set()
+        raise RuntimeError("Attitude telemetry stream ended")
+
+    def get_attitude(self, max_age=0.5):
+        if self._attitude_task is not None and self._attitude_task.done():
+            self._attitude_task.result()
+        if self._attitude is None or time.perf_counter() - self._attitude_received_at > max_age:
+            return None
+        return self._attitude
+
+    async def _run(self, drone):
         last_frame = None
 
         while True:
@@ -210,6 +243,8 @@ class VisualOdometry:
             if obs is None:
                 continue
 
+            if self.get_attitude() is None:
+                continue
             self._latest = obs
             self._valid += 1
             if self._valid >= 10:
@@ -221,12 +256,15 @@ class VisualOdometry:
                     or obs.timestamp < self._initialize_after
                 ):
                     continue
-                await self._initialize_frame(drone, obs)
+                if not await self._initialize_frame(drone, obs):
+                    continue
                 self._frame_ready.set()
 
 
 
-            attitude = await fc.get_drone_attitude_euler(drone)
+            attitude = self.get_attitude()
+            if attitude is None:
+                continue
             position, R = self._local_body_pose(obs, attitude)
             
             if self._fusion_enabled:
