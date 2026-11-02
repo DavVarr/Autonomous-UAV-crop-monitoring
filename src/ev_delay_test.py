@@ -221,7 +221,7 @@ async def record_test(args):
             print(f"   {name} = {await drone.param.get_param_int(name)}")
         except Exception as error:
             print(f"   {name}: could not read ({error})")
-    print("   (EKF2_EV_CTRL bits: 1=horiz pos, 2=vert pos, 4=velocity, 8=yaw; must be non-zero)")
+    print("   (EKF2_EV_CTRL: 0 is valid for timing-only recording; keep yaw-fusion bit 8 clear)")
 
     w, h = config["camera"]["resolution"]
     csv_path = Path(str(args.output_prefix) + ".csv")
