@@ -175,7 +175,7 @@ def horizontal_distance(lat1, lon1, lat2, lon2):
 async def fly_to_global(drone: System,
                          target_lat, target_lon, target_alt,
                          heading=float('nan'),
-                         max_velocity=10.0, max_acceleration=3.0, max_jerk=4.0):
+                         max_velocity=10.0, max_acceleration=3.0, max_jerk=4.0, launch_down=None):
     M_PER_DEG_LAT = 111_320.0
  
     gpos = await get_drone_global_position(drone)
@@ -185,7 +185,8 @@ async def fly_to_global(drone: System,
     target = PositionNedYaw(
         pos.north_m + (target_lat - gpos.latitude_deg) * M_PER_DEG_LAT,
         pos.east_m  + (target_lon - gpos.longitude_deg) * m_per_deg_lon,
-        pos.down_m  + (gpos.relative_altitude_m - target_alt),   # NED down is positive
+        (launch_down - target_alt if launch_down is not None
+         else pos.down_m + (gpos.relative_altitude_m - target_alt)),   # This should be used when px4 fixes home altitude shift bug
         heading
     )
  

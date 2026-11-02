@@ -101,10 +101,11 @@ async def run():
     await drone.action.arm()
     await asyncio.sleep(1)
     takeoff_start = await fc.get_drone_ned_position(drone)
+    launch_down = takeoff_start.down_m
     takeoff_target = PositionNedYaw(
         takeoff_start.north_m,
         takeoff_start.east_m,
-        takeoff_start.down_m - TAKE_OFF_ALTITUDE,
+        launch_down - TAKE_OFF_ALTITUDE,
         float("nan"),
     )
     await drone.offboard.set_position_ned(takeoff_target)
@@ -131,6 +132,7 @@ async def run():
             waypoint["altitude"],
             heading=float("nan"),
             max_velocity=5.0,
+            launch_down=launch_down,
         )
         await asyncio.sleep(1)
 
@@ -235,9 +237,9 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
     vision.enable_frame_initialization()
     await vision.wait_frame_ready()
 
-    # print("-- Disabling GPS horizontal position fusion")
-    await drone.param.set_param_int("EKF2_GPS_CTRL", 6)
-    await utilities.wait_gps_ctrl(drone, 6)
+    # print("-- Disabling GPS horizontal and vertical position fusion")
+    await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
+    await utilities.wait_gps_ctrl(drone, 4)
     vision.enable_fusion()
 
     operation_task = asyncio.create_task(align_ruckig_fov_safe(
