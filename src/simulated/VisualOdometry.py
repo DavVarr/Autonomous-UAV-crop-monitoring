@@ -190,11 +190,14 @@ class VisualOdometry:
         )
 
     def _vpe(self, position, R):
-        roll, pitch, yaw = _euler321(R)
+        # Position-only EV. To restore attitude output, uncomment the Euler conversion
+        # and use the commented AngleBody instead of NaNs.
+        # roll, pitch, yaw = _euler321(R)
         return VisionPositionEstimate(
             0,
             PositionBody(*map(float, position)),
-            AngleBody(float(roll), float(pitch), float(yaw)),
+            # AngleBody(float(roll), float(pitch), float(yaw)),
+            AngleBody(float("nan"), float("nan"), float("nan")),
             self._pose_covariance,
             self._reset_counter,
         )

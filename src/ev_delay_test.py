@@ -22,8 +22,8 @@ import numpy as np
 # ---------------------------------------------------------------- recording
 try:
     import camera as camera_module
-    from simulated.VisualOdometry import VisualOdometry
-    from mavsdk_grpc.mocap import VisionPositionEstimate
+    from simulated.VisualOdometry import VisualOdometry, _euler321
+    from mavsdk_grpc.mocap import AngleBody, VisionPositionEstimate
     HAVE_FLIGHT = True
 except ImportError as error:  # analysis on a laptop: recording classes unavailable
     HAVE_FLIGHT = False
@@ -119,6 +119,8 @@ if HAVE_FLIGHT:
 
         def _vpe(self, position, R):
             msg = super()._vpe(position, R)
+            # Keep marker-derived attitude for the yaw-delay measurement.
+            msg.angle_body = AngleBody(*map(float, _euler321(R)))
             if self._cur is not None and self._send_usec:
                 msg = VisionPositionEstimate(
                     self._cur["capture_unix_us"], msg.position_body, msg.angle_body,
