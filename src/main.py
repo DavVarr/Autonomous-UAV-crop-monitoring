@@ -10,6 +10,7 @@ from mavsdk_grpc.mission import MissionItem, MissionError
 from mavsdk_grpc.action import OrbitYawBehavior
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
+from picamera2.outputs import FileOutput
 import numpy as np
 import cv2.aruco as aruco
 from contextlib import suppress
@@ -94,7 +95,8 @@ async def run():
     #Preparing Aruco detector
     detector = buildArucoDetector()
 
-    camera.start_recording(encoder, 'video.h264')
+    video_output = camera_module.QueuedOutput(FileOutput('video.h264'))
+    camera.start_recording(encoder, video_output)
     video = camera_module.Video(camera)
     # print("-- Arming")
     logging.info("Arming and taking off")

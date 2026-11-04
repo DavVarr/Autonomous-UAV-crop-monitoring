@@ -1,6 +1,7 @@
 """Isolate camera/encoder/detection gaps without connecting to a flight controller.
 
     python3 src/camera_frame_test.py record --duration 120 --output-prefix camera_full
+    python3 src/camera_frame_test.py record --duration 120 --output-prefix camera_queued --queued-output
     python3 src/camera_frame_test.py record --duration 120 --output-prefix camera_only --no-detection
     python3 src/camera_frame_test.py record --duration 120 --output-prefix camera_detect --no-recording
     python3 src/camera_frame_test.py analyze camera_full
@@ -101,6 +102,7 @@ async def record(args):
             return start, clock_ns(), 0 if ids is None else len(ids)
 
     camera = Picamera2()
+    output = None
     started = False
     try:
         width, height = config["camera"]["resolution"]
@@ -115,6 +117,9 @@ async def record(args):
         else:
             output = TimedOutput(str(output_path(args.output_prefix, ".h264")),
                                  pts=str(output_path(args.output_prefix, ".pts")))
+            if args.queued_output:
+                output = camera_module.QueuedOutput(output)
+                print("Queued output: encoder CSV measures file writes in the writer thread")
             camera.start_recording(H264Encoder(10_000_000), output)
         started = True
         deadline = time.perf_counter() + args.duration
@@ -137,6 +142,8 @@ async def record(args):
             if time.perf_counter() - progress >= 5:
                 print(f"Camera requests: {len(rows['camera'])}; encoder outputs: "
                       f"{len(rows['encoder'])}; detection frames: {len(rows['detect'])}")
+                if args.queued_output:
+                    print(f"Video queue: {output.queue_depth} frames; error: {output.error}")
                 progress = time.perf_counter()
     finally:
         try:
@@ -149,6 +156,8 @@ async def record(args):
             finally:
                 camera.close()
         finally:
+            if args.queued_output and output is not None:
+                print(f"Video queue peak: {output.max_queue_depth} frames; error: {output.error}")
             for name, fields in FIELDS.items():
                 with output_path(args.output_prefix, f"_{name}.csv").open("x", newline="") as file:
                     writer = csv.writer(file)
@@ -234,6 +243,8 @@ def main():
                           default=Path(f"camera_frames_{datetime.now():%Y%m%d_%H%M%S_%f}"))
     recorder.add_argument("--no-recording", action="store_true")
     recorder.add_argument("--no-detection", action="store_true")
+    recorder.add_argument("--queued-output", action="store_true",
+                          help="Write video in a worker; encoder CSV still measures actual file-write time")
     analyzer = commands.add_parser("analyze", help="Analyze timing CSVs on the Pi or laptop")
     analyzer.add_argument("prefix", type=Path)
     analyzer.add_argument("--gap-ms", type=float, default=100)
@@ -241,6 +252,8 @@ def main():
     if args.command == "record":
         if not np.isfinite(args.duration) or args.duration <= 0:
             parser.error("--duration must be finite and positive")
+        if args.queued_output and args.no_recording:
+            parser.error("--queued-output requires recording")
         try:
             asyncio.run(record(args))
         except KeyboardInterrupt:
