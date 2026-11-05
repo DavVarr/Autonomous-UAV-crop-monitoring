@@ -74,6 +74,20 @@ async def run():
             # print("-- Global position estimate OK")
             break
 
+    # Initialize the global altitude origin before arming, preserving its latitude/longitude.
+    origin = await asyncio.wait_for(drone.telemetry.get_gps_global_origin(), timeout=5.0)
+    gps = await asyncio.wait_for(anext(drone.telemetry.raw_gps()), timeout=5.0)
+    pos = await asyncio.wait_for(fc.get_drone_ned_position(drone), timeout=5.0)
+    if not np.isfinite([
+        origin.latitude_deg, origin.longitude_deg, gps.absolute_altitude_m, pos.down_m,
+    ]).all():
+        raise ValueError("Cannot initialize GPS global origin from non-finite telemetry")
+    origin_altitude_m = gps.absolute_altitude_m + pos.down_m
+    await asyncio.wait_for(drone.action.set_gps_global_origin(
+        origin.latitude_deg, origin.longitude_deg, origin_altitude_m,
+    ), timeout=5.0)
+    logging.info(f"Initialized EKF global origin altitude to {origin_altitude_m:.3f} m AMSL")
+
     # Preparing camera
     camera = Picamera2()
     frame_width, frame_height = config["camera"]["resolution"]
