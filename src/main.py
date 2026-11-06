@@ -163,7 +163,8 @@ async def run():
             # print("Aruco located!")
             vision = VisualOdometry(
                 video, detector, mtx, dist, marker_size=marker_size, marker_id=None,
-                camera_to_body=camera_to_body, camera_position_body=camera_position_body)
+                camera_to_body=camera_to_body, camera_position_body=camera_position_body,
+                origin_altitude_m=origin_altitude_m)
             vision_task = asyncio.create_task(vision.run(drone))
 
             result = await align_noGPS_with_failsafe(

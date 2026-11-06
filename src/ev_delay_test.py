@@ -225,6 +225,9 @@ async def record_test(args):
             print(f"   {name}: could not read ({error})")
     print("   (EKF2_EV_CTRL: 0 is valid for timing-only recording; keep yaw-fusion bit 8 clear)")
 
+    origin = await asyncio.wait_for(drone.telemetry.get_gps_global_origin(), 5.0)
+    if not np.isfinite(origin.altitude_m):
+        raise ValueError("EV origin altitude must be finite")
     w, h = config["camera"]["resolution"]
     csv_path = Path(str(args.output_prefix) + ".csv")
     video_path = Path(str(args.output_prefix) + ".h264")
@@ -255,6 +258,7 @@ async def record_test(args):
             marker_size=config["aruco_size"], marker_id=None,
             camera_to_body=np.array(config["camera"]["camera_to_body"]),
             camera_position_body=np.array(config["camera"]["camera_position_body"]),
+            origin_altitude_m=origin.altitude_m,
             probe_csv=csv_path,
         )
         vision_task = asyncio.create_task(vision.run(drone))
@@ -291,6 +295,7 @@ async def record_test(args):
                 print("No fresh cached attitude")
                 continue
             vp = np.array([sent.position_body.x_m, sent.position_body.y_m, sent.position_body.z_m])
+            vp[2] += origin.altitude_m  # Convert wire height back to local NED for comparison.
             px = np.array([pv.position.north_m, pv.position.east_m, pv.position.down_m])
             dyaw = (np.degrees(sent.angle_body.yaw_rad) - att.yaw_deg + 180) % 360 - 180
             print(f"[{now - t0:6.1f}s] rate {rate:5.1f} Hz | "

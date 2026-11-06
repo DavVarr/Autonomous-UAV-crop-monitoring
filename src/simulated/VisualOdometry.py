@@ -32,11 +32,14 @@ class VisualOdometry:
     def __init__(
         self, video, detector, mtx, dist, marker_size=0.5, marker_id=None,
         camera_to_body=CAMERA_TO_BODY, camera_position_body=None,
-        position_sigma=0.05, attitude_sigma_deg=2.0,
+        position_sigma=0.05, attitude_sigma_deg=2.0, origin_altitude_m=0.0,
     ):
         self.video, self.detector = video, detector
         self.mtx, self.dist = np.asarray(mtx, float), np.asarray(dist, float)
         self.marker_size, self.marker_id = float(marker_size), marker_id
+        self._origin_altitude_m = float(origin_altitude_m)
+        if not np.isfinite(self._origin_altitude_m):
+            raise ValueError("EV origin altitude must be finite")
         self.camera_to_body = np.asarray(camera_to_body, float)
         self.camera_position_body = (
             np.zeros(3) if camera_position_body is None
@@ -190,6 +193,10 @@ class VisualOdometry:
         )
 
     def _vpe(self, position, R):
+        # PX4's EV-height reference resets absolute altitude to -Z.
+        # Convert only the published height; keep planner/marker positions local NED.
+        position = np.array(position, dtype=float, copy=True)
+        position[2] -= self._origin_altitude_m
         # Position-only EV. To restore attitude output, uncomment the Euler conversion
         # and use the commented AngleBody instead of NaNs.
         # roll, pitch, yaw = _euler321(R)
