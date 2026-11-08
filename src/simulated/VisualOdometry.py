@@ -51,6 +51,17 @@ class VisualOdometry:
         self._latest = None
         self._last_corners = None
         self._telemetry_cache = None
+        self._visual_yaw_reference = None
+        self._visual_yaw = float("nan")
+        self._yaw_target = None
+        self._next_yaw_log = 0.0
+        self._frames = self._published = 0
+        self._yaw_log_counts = (0, 0, 0)
+        self._capture_ms = self._detection_ms = 0.0
+        self._frame_size = None
+        self._last_vpe_position = np.full(3, np.nan)
+        self._last_vpe_at = self._last_vpe_frame_at = self._max_publish_gap = 0.0
+        self._last_vpe_attitude_us = 0
 
         self._ready = asyncio.Event()
         self._fusion_enabled = False
@@ -204,10 +215,65 @@ class VisualOdometry:
         p_body_marker, R_body_marker = self._marker_in_body(obs)
         R_ned_body = _body_to_ned(attitude)
 
+        if self._visual_yaw_reference is not None:
+            # Align only the marker's horizontal X direction; retain PX4 roll/pitch.
+            marker_axis = R_ned_body @ R_body_marker[:, 0]
+            delta = self._visual_yaw_reference - np.arctan2(marker_axis[1], marker_axis[0])
+            c, s = np.cos(delta), np.sin(delta)
+            R_ned_body = np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]]) @ R_ned_body
+            self._visual_yaw = np.arctan2(R_ned_body[1, 0], R_ned_body[0, 0])
+
         return (
             self._p_ned_marker - R_ned_body @ p_body_marker,
             self._R_ned_marker @ R_body_marker.T,
         )
+
+    def enable_visual_yaw(self, target_position):
+        # Heading is still fixed here; allow a complete detection cycle to anchor.
+        obs, attitude = self.get_observation(max_age=0.5), self.get_attitude()
+        if obs is None or attitude is None:
+            return False
+        _, R_body_marker = self._marker_in_body(obs)
+        marker_axis = _body_to_ned(attitude) @ R_body_marker[:, 0]
+        self._visual_yaw_reference = np.arctan2(marker_axis[1], marker_axis[0])
+        self._visual_yaw = np.deg2rad(attitude.yaw_deg)
+        self._yaw_target = np.asarray(target_position, float).copy()
+        self._yaw_log_counts = (self._frames, self._valid, self._published)
+        self._max_publish_gap = 0.0
+        self._next_yaw_log = 0.0
+        logging.info("Visual yaw anchored: id=%s fc_yaw=%.2f marker_heading=%.2f obs_age=%.3fs",
+                     obs.marker_id, attitude.yaw_deg, np.degrees(self._visual_yaw_reference),
+                     time.perf_counter() - obs.timestamp)
+        return True
+
+    def _log_yaw(self):
+        now = time.perf_counter()
+        if self._yaw_target is None or now < self._next_yaw_log:
+            return
+        self._next_yaw_log = now + 1.0
+        cache, obs = self._telemetry_cache, self._latest
+        pv = cache.latest("position_velocity_ned")
+        attitude = self.get_attitude()
+        position = ([pv.position.north_m, pv.position.east_m, pv.position.down_m]
+                    if pv is not None else [np.nan] * 3)
+        velocity = ([pv.velocity.north_m_s, pv.velocity.east_m_s, pv.velocity.down_m_s]
+                    if pv is not None else [np.nan] * 3)
+        rpy = ([attitude.roll_deg, attitude.pitch_deg, attitude.yaw_deg]
+               if attitude is not None else [np.nan] * 3)
+        margin = (min(obs.corners.min(), np.min(np.asarray(self._frame_size) - 1 - obs.corners))
+                  if obs is not None and self._frame_size is not None else np.nan)
+        counts = (self._frames, self._valid, self._published)
+        logging.info(
+            "Yaw tracking: t=%.3f target=(%.3f,%.3f,%.3f) p=(%.3f,%.3f,%.3f) v=(%.3f,%.3f,%.3f) vpe=(%.3f,%.3f,%.3f) fc_rpy=(%.2f,%.2f,%.2f) visual_yaw=%.2f id=%s margin_px=%.1f obs_age=%.3fs publish_age=%.3fs frames/valid/sent=%d/%d/%d max_publish_gap=%.3fs capture_ms=%.1f detect_ms=%.1f vpe_frame_at=%.3f vpe_attitude_us=%d attitude_age=%.3fs position_age=%.3fs",
+            now, *self._yaw_target, *position, *velocity, *self._last_vpe_position, *rpy,
+            np.degrees(self._visual_yaw), getattr(obs, "marker_id", None), margin,
+            now - obs.timestamp if obs is not None else float("inf"), now - self._last_vpe_at,
+            *(a - b for a, b in zip(counts, self._yaw_log_counts)),
+            max(self._max_publish_gap, now - self._last_vpe_at), self._capture_ms, self._detection_ms,
+            self._last_vpe_frame_at, self._last_vpe_attitude_us,
+            cache.age("attitude_euler"), cache.age("position_velocity_ned"),
+        )
+        self._yaw_log_counts, self._max_publish_gap = counts, 0.0
 
     def _vpe(self, position, R):
         # PX4's EV-height reference resets absolute altitude to -Z.
@@ -247,15 +313,22 @@ class VisualOdometry:
         last_frame = None
 
         while True:
+            self._log_yaw()
+            capture_start = time.perf_counter()
             frame = self.video.frame()
+            frame_time = time.perf_counter()
+            self._capture_ms = (frame_time - capture_start) * 1000
             if frame is None or frame is last_frame:
                 await asyncio.sleep(0.005)
                 continue
 
             last_frame = frame
+            self._frame_size = (frame.shape[1], frame.shape[0])
             obs = await asyncio.to_thread(
-                self._detect, frame, time.perf_counter()
+                self._detect, frame, frame_time
             )
+            self._frames += 1
+            self._detection_ms = (time.perf_counter() - frame_time) * 1000
 
             if obs is None:
                 continue
@@ -288,12 +361,20 @@ class VisualOdometry:
                 await drone.mocap.set_vision_position_estimate(
                     self._vpe(position, R)
                 )
+                now = time.perf_counter()
+                if self._last_vpe_at:
+                    self._max_publish_gap = max(self._max_publish_gap, now - self._last_vpe_at)
+                self._last_vpe_position = position.copy()
+                self._last_vpe_at, self._last_vpe_frame_at = now, obs.timestamp
+                self._last_vpe_attitude_us = getattr(attitude, "timestamp_us", 0)
+                self._published += 1
     
     def enable_fusion(self):
         self._fusion_enabled = True
 
     def disable_fusion(self):
         self._fusion_enabled = False
+        self._visual_yaw_reference = self._yaw_target = None
 
 
 

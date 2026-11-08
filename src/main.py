@@ -139,6 +139,7 @@ async def _run_mission(drone, config):
         # print("-- Offboard engaged")
     except OffboardError as e:
         # print(f"Offboard start failed: {e._result.result}")
+        await drone.action.hold()
         await drone.action.return_to_launch()
         camera.stop_recording()
         camera.close()
@@ -196,6 +197,7 @@ async def _run_mission(drone, config):
 
     # print("Mission completed! Return to home")
     logging.info(f"Mission completed, return to home")
+    await drone.action.hold()
     await drone.action.return_to_launch()
     camera.stop_recording()
     camera.close()
@@ -306,6 +308,7 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
 
     if loss_task in done:
         # print("-- ArUco lost for 2 seconds, aborting")
+        logging.info("Alignment aborted: marker lost for 2 seconds")
 
         operation_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -314,6 +317,7 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
         vision.disable_fusion()
 
         # print("-- Restoring GPS fusion")
+        logging.info("Alignment restoring EKF2_GPS_CTRL=%d after marker loss", gps_ctrl)
         await drone.param.set_param_int("EKF2_GPS_CTRL", gps_ctrl)
 
         # print("-- Recovering altitude using GPS")
@@ -326,6 +330,7 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
     success = await operation_task
 
     # print("-- Restoring GPS fusion")
+    logging.info("Alignment finished: success=%s; restoring EKF2_GPS_CTRL=%d", success, gps_ctrl)
     await drone.param.set_param_int(
         "EKF2_GPS_CTRL", gps_ctrl
     )
@@ -343,7 +348,9 @@ async def align_ruckig_fov_safe(drone,vision,initial_state,return_down,frame_wid
     )
     if not success:
         return False
+    logging.info("Post-yaw hold started: duration=5s")
     await asyncio.sleep(5)
+    logging.info("Post-yaw hold completed; recovering altitude")
     # print("-- Alignment complete, returning to altitude")
     pos = await fc.get_drone_ned_position(drone)
     await fc.fly_to_ned_smooth(

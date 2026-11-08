@@ -1,5 +1,6 @@
 import asyncio
 import time
+import logging
 from math import cos, radians, sin
 
 import cv2
@@ -280,6 +281,7 @@ async def align_to_aruco_ruckig_adaptive(
         )
         await asyncio.sleep(1.0 / 30.0)
     #print("phase2")
+    logging.info("Alignment descent started: duration=%.3fs", trajectory.duration)
     start = time.perf_counter()
     while True:
         elapsed = time.perf_counter() - start
@@ -298,15 +300,24 @@ async def align_to_aruco_ruckig_adaptive(
     marker_forward = marker_corners_ned[0] - marker_corners_ned[3]
     target_yaw = np.arctan2(marker_forward[1], marker_forward[0])
 
+    final_position = _rotate_frame(full_target, heading, True)
+    logging.info("Waiting for visual yaw anchor")
+    anchor_start = time.perf_counter()
+    while not vision.enable_visual_yaw(final_position):
+        if time.perf_counter() - anchor_start > marker_loss_timeout:
+            logging.info("Final yaw aborted: no recent observation/attitude for visual anchor")
+            return False
+        await asyncio.sleep(0.05)
     attitude = await fc.get_drone_attitude_euler(drone)
     yaw_setpoint = np.deg2rad(attitude.yaw_deg)
+    logging.info("Final yaw started: actual=%.2f target=%.2f", attitude.yaw_deg, np.degrees(target_yaw))
 
     max_yaw_rate = np.deg2rad(75.)
     yaw_gain = 3.0                   # 1/s
     tolerance = np.deg2rad(1.)
 
     last = time.perf_counter()
-    final_position = _rotate_frame(full_target, heading, True)
+    next_log = last
     while True:
         now = time.perf_counter()
         dt = now - last
@@ -328,6 +339,12 @@ async def align_to_aruco_ruckig_adaptive(
             target_yaw - np.deg2rad(attitude.yaw_deg)
         )
 
+        if now >= next_log:
+            logging.info("Final yaw command: setpoint=%.2f actual=%.2f target=%.2f error=%.2f",
+                         np.degrees(_wrap_pi(yaw_setpoint)), attitude.yaw_deg,
+                         np.degrees(target_yaw), np.degrees(actual_error))
+            next_log = now + 1.0
         if abs(actual_error) < tolerance and abs(error) < tolerance:
+            logging.info("Final yaw completed: actual=%.2f error=%.2f", attitude.yaw_deg, np.degrees(actual_error))
             return True
         await asyncio.sleep(1.0 / 30.0)

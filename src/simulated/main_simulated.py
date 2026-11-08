@@ -126,6 +126,7 @@ async def _run_mission(drone):
         print("-- Offboard engaged")
     except OffboardError as e:
         print(f"Offboard start failed: {e._result.result}")
+        await drone.action.hold()
         await drone.action.return_to_launch()
         stop_display.set()
         display_thread.join(timeout=1.0)
@@ -177,6 +178,7 @@ async def _run_mission(drone):
 
     print("Mission completed! Return to home")
     logging.info(f"Mission completed, return to home")
+    await drone.action.hold()
     await drone.action.return_to_launch()
     stop_display.set()
     display_thread.join(timeout=1.0)
