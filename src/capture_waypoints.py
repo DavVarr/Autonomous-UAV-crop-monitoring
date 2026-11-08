@@ -4,6 +4,7 @@
 
 Latitude/longitude come from raw GPS. Altitude is the requested cruise height
 above the launch reference, not the GPS altitude above mean sea level.
+Quitting saves the captured waypoints to config.json, replacing existing ones.
 """
 import argparse
 import asyncio
@@ -49,7 +50,8 @@ async def capture_waypoint(drone, altitude):
 async def run(altitude):
     from mavsdk_grpc import System
 
-    with (Path(__file__).resolve().parents[1] / "config.json").open() as file:
+    config_path = Path(__file__).resolve().parents[1] / "config.json"
+    with config_path.open() as file:
         config = json.load(file)
     drone = System()
     print(f"Connecting to {config['system_address']}...")
@@ -78,7 +80,11 @@ async def run(altitude):
             print(f"Waypoint {len(waypoints)}:")
             print(json.dumps(waypoint, indent=2))
     finally:
-        print("\nCopy the waypoints array into config.json:")
+        config["waypoints"] = waypoints
+        with config_path.open("w") as file:
+            json.dump(config, file, indent=2)
+            file.write("\n")
+        print(f"\nSaved {len(waypoints)} waypoints to {config_path}:")
         print(json.dumps({"waypoints": waypoints}, indent=2))
 
 
