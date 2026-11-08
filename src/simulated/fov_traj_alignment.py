@@ -312,8 +312,8 @@ async def align_to_aruco_ruckig_adaptive(
     yaw_setpoint = np.deg2rad(attitude.yaw_deg)
     logging.info("Final yaw started: actual=%.2f target=%.2f", attitude.yaw_deg, np.degrees(target_yaw))
 
-    max_yaw_rate = np.deg2rad(75.)
-    yaw_gain = 3.0                   # 1/s
+    max_yaw_rate = np.deg2rad(60.)
+    yaw_gain = 1.0                   # 1/s
     tolerance = np.deg2rad(1.)
 
     last = time.perf_counter()
