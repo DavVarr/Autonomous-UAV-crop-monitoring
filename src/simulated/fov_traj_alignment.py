@@ -224,6 +224,7 @@ async def align_to_aruco_ruckig_adaptive(
             loss_start = now if loss_start is None else loss_start
             if now - loss_start > marker_loss_timeout:
                 return False
+            await asyncio.sleep(0.05)
             continue
 
         loss_start = None
@@ -277,7 +278,7 @@ async def align_to_aruco_ruckig_adaptive(
             VelocityNedYaw(*map(float, v), heading),
             AccelerationNed(*map(float, a)),
         )
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(1.0 / 30.0)
     #print("phase2")
     start = time.perf_counter()
     while True:
@@ -291,7 +292,7 @@ async def align_to_aruco_ruckig_adaptive(
         )
         if elapsed > trajectory.duration:
             break
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(1.0 / 30.0)
 
 
     marker_forward = marker_corners_ned[0] - marker_corners_ned[3]
@@ -300,8 +301,8 @@ async def align_to_aruco_ruckig_adaptive(
     attitude = await fc.get_drone_attitude_euler(drone)
     yaw_setpoint = np.deg2rad(attitude.yaw_deg)
 
-    max_yaw_rate = np.deg2rad(85.)
-    yaw_gain = 2.0                   # 1/s
+    max_yaw_rate = np.deg2rad(75.)
+    yaw_gain = 3.0                   # 1/s
     tolerance = np.deg2rad(1.)
 
     last = time.perf_counter()
@@ -329,4 +330,4 @@ async def align_to_aruco_ruckig_adaptive(
 
         if abs(actual_error) < tolerance and abs(error) < tolerance:
             return True
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(1.0 / 30.0)

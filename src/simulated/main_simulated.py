@@ -64,6 +64,12 @@ async def run():
     logging.basicConfig(filename="log.txt", level=logging.INFO, format="%(asctime)s %(message)s")
 
     drone = System()
+    try:
+        await _run_mission(drone)
+    finally:
+        drone._stop_mavsdk_server()
+
+async def _run_mission(drone):
     print("Connecting...")
     await drone.connect()
 
@@ -121,6 +127,8 @@ async def run():
     except OffboardError as e:
         print(f"Offboard start failed: {e._result.result}")
         await drone.action.return_to_launch()
+        stop_display.set()
+        display_thread.join(timeout=1.0)
         return
 
     while True:
@@ -169,8 +177,9 @@ async def run():
 
     print("Mission completed! Return to home")
     logging.info(f"Mission completed, return to home")
-    await drone.offboard.stop()
     await drone.action.return_to_launch()
+    stop_display.set()
+    display_thread.join(timeout=1.0)
 
 async def _wait_marker_loss(vision, timeout=2.0):
     while True:

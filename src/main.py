@@ -74,6 +74,15 @@ async def run():
             # print("-- Global position estimate OK")
             break
 
+    telemetry = fc.TelemetryCache(drone)
+    try:
+        await telemetry.start()
+        await _run_mission(drone, config)
+    finally:
+        await telemetry.close()
+        drone._stop_mavsdk_server()
+
+async def _run_mission(drone, config):
     # Initialize the global altitude origin before arming, preserving its latitude/longitude.
     origin = await asyncio.wait_for(drone.telemetry.get_gps_global_origin(), timeout=5.0)
     gps = await asyncio.wait_for(anext(drone.telemetry.raw_gps()), timeout=5.0)
@@ -131,10 +140,12 @@ async def run():
     except OffboardError as e:
         # print(f"Offboard start failed: {e._result.result}")
         await drone.action.return_to_launch()
+        camera.stop_recording()
+        camera.close()
         return
 
     while True:
-        pos = await fc.get_drone_ned_position(drone)
+        pos = await fc.get_drone_ned_position(drone, fresh=True)
         if fabs(pos.down_m - takeoff_target.down_m) <= 0.5:
             break
 
@@ -155,7 +166,8 @@ async def run():
         arucoFound = None
         for s in range(ARUCO_SEARCH_TRIES):
             arucoFound, transition_task = await aruco_search(
-                drone, video, detector, mtx, dist, marker_size)
+                drone, video, detector, mtx, dist, marker_size,
+                camera_to_body=camera_to_body, camera_position_body=camera_position_body)
             if not arucoFound is None:
                 break
 
@@ -184,9 +196,7 @@ async def run():
 
     # print("Mission completed! Return to home")
     logging.info(f"Mission completed, return to home")
-    await drone.offboard.stop()
     await drone.action.return_to_launch()
-
     camera.stop_recording()
     camera.close()
 
@@ -203,12 +213,19 @@ async def _wait_alignment_entry(vision, transition_task,
                                 stable_time=0.15):
     good_since = None
     cos_limit = np.cos(maximum_angle)
+    start = perf_counter()
+    next_log = start + 2.0
+    logging.info("Waiting for alignment entry")
 
     while True:
         obs = vision.get_observation(max_age=0.15)
         state = transition_task.handoff
         good = False
+        speed = distance = direction_cos = float("nan")
+        reason = "no fresh observation"
 
+        if obs is not None:
+            reason = "transition state unavailable"
         if obs is not None and all(k in state for k in ("p", "v")):
             p = state["p"]
             v = state["v"]
@@ -224,15 +241,31 @@ async def _wait_alignment_entry(vision, transition_task,
                 motion_ok = direction_cos >= cos_limit
 
             good = motion_ok
+            reason = "stabilizing" if motion_ok else "planned motion not toward target"
 
         if good:
             if good_since is None:
                 good_since = perf_counter()
             elif perf_counter() - good_since >= stable_time:
+                logging.info("Alignment entry accepted after %.2fs: planned_speed=%.3f distance=%.3f",
+                             perf_counter() - start, speed, distance)
                 return
         else:
             good_since = None
 
+        if perf_counter() >= next_log:
+            latest = vision._latest
+            cache = vision._telemetry_cache
+            logging.info(
+                "Alignment entry waiting %.1fs: %s valid=%d last_id=%s obs_age=%.3fs planned_speed=%.3f distance=%.3f direction_cos=%.3f transition_done=%s transition_error=%s position_age=%.3fs attitude_age=%.3fs",
+                perf_counter() - start, reason, vision._valid, getattr(latest, "marker_id", None),
+                perf_counter() - latest.timestamp if latest is not None else float("inf"),
+                speed, distance, direction_cos, transition_task.done(),
+                transition_task.exception() if transition_task.done() and not transition_task.cancelled() else None,
+                cache.age("position_velocity_ned") if cache is not None else float("inf"),
+                cache.age("attitude_euler") if cache is not None else float("inf"),
+            )
+            next_log = perf_counter() + 2.0
         await asyncio.sleep(0.05)
 
 async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_task, frame_width, frame_height):
@@ -255,9 +288,11 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
     await vision.wait_frame_ready()
 
     # print("-- Disabling GPS horizontal and vertical position fusion")
+    logging.info("Alignment requesting EKF2_GPS_CTRL=4")
     await drone.param.set_param_int("EKF2_GPS_CTRL", 4)
     await utilities.wait_gps_ctrl(drone, 4)
     vision.enable_fusion()
+    logging.info("EKF2_GPS_CTRL=4 confirmed; vision publishing enabled")
 
     operation_task = asyncio.create_task(align_ruckig_fov_safe(
             drone, vision, initial_state, return_down, frame_width, frame_height)
@@ -316,12 +351,11 @@ async def align_ruckig_fov_safe(drone,vision,initial_state,return_down,frame_wid
     )
     return True
 
-async def aruco_search(drone: System, video: camera_module.Video, detector, mtx, dist, marker_size):
+async def aruco_search(drone: System, video: camera_module.Video, detector, mtx, dist, marker_size,
+                       camera_to_body=utilities.CAMERA_TO_BODY, camera_position_body=None):
     # print("Starting aruco search")
-    battery = await fc.get_drone_remaining_battery(drone)
-    logging.info(f"Started aruco search with {battery.remaining_percent}% of battery, {battery.voltage_v} Volts")
+    logging.info("Started aruco search")
     round = 1
-    initial_altitude = await fc.get_drone_altitude(drone)
     center_ned = await fc.get_drone_ned_position(drone)
     heading = await fc.get_drone_heading(drone)
     while round < ARUCO_SEARCH_ROUNDS:
@@ -337,6 +371,7 @@ async def aruco_search(drone: System, video: camera_module.Video, detector, mtx,
         result, transition_task = await utilities.look_for_aruco_orbit(
             drone, video, detector, mtx, dist,
             center_ned, heading, radius, 1, marker_size,
+            camera_to_body=camera_to_body, camera_position_body=camera_position_body,
         )
         if result is not None:
             return result, transition_task

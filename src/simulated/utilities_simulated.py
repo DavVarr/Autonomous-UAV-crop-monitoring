@@ -1,13 +1,15 @@
 import asyncio
 import ruckig
 import time
+import logging
 from mavsdk_grpc.telemetry import PositionNed, Position
 from mavsdk_grpc.offboard import PositionNedYaw, VelocityNedYaw, AccelerationNed
-from aruco_pose import VideoSource, checkArucoPresence
+from aruco_pose import VideoSource, checkArucoPresence, my_estimatePoseSingleMarkers
 from math import fabs, degrees, radians, pi, cos, sin, sqrt, atan2, asin
 import numpy as np
 import simulated.fc_simulated as fc
 from mavsdk_grpc import System
+from simulated.VisualOdometry import CAMERA_TO_BODY, _body_to_ned
 
 def sign(num):
     if num == 0: return 0
@@ -61,7 +63,8 @@ async def get_position_corrections(
 
     return [current_forward_correction, current_right_correction, forward_wind_speed, right_wind_speed]
 
-def get_aruco_distances_and_yaw(rvecs, tvecs) -> list[float] | None:
+def get_aruco_distances_and_yaw(rvecs, tvecs, camera_to_body=CAMERA_TO_BODY,
+                               camera_position_body=None) -> list[float] | None:
     """Convert an already-computed marker pose to the aligned distances.
 
     This function performs no image acquisition and no ArUco detection. Pass
@@ -75,9 +78,10 @@ def get_aruco_distances_and_yaw(rvecs, tvecs) -> list[float] | None:
     rvec = np.asarray(rvecs[0], dtype=float).reshape(3)
     tvec = np.asarray(tvecs[0], dtype=float).reshape(3)
 
-    forward_distance = -float(tvec[1])
-    right_distance = float(tvec[0])
-    vertical_distance = float(tvec[2])
+    body = np.asarray(camera_to_body) @ tvec
+    if camera_position_body is not None:
+        body += np.asarray(camera_position_body)
+    forward_distance, right_distance, vertical_distance = map(float, body)
     yaw_difference = normalize_heading(degrees(float(rvec[2])))
 
     return [
@@ -102,12 +106,14 @@ def detect_aruco_distances_and_yaw(video: VideoSource, detector, mtx, dist, mark
     return get_aruco_distances_and_yaw(rvecs, tvecs)
 
 
-async def calculate_target_ned_position(drone: System, aruco_distances: list[float]) -> PositionNedYaw:
-    current_ned_position: PositionNed = await fc.get_drone_ned_position(drone)
-    current_heading = await fc.get_drone_heading(drone)
+async def calculate_target_ned_position(drone: System, aruco_distances: list[float],
+                                       position=None, attitude=None) -> PositionNedYaw:
+    current_ned_position = position if position is not None else await fc.get_drone_ned_position(drone)
+    attitude = attitude if attitude is not None else await fc.get_drone_attitude_euler(drone)
+    current_heading = attitude.yaw_deg % 360.0
 
 
-    ned_vector = rotate_vector(aruco_distances[0], aruco_distances[1], current_heading)
+    ned_vector = _body_to_ned(attitude) @ np.asarray(aruco_distances[:3])
 
     target_position = PositionNedYaw(
         ned_vector[0] + current_ned_position.north_m,
@@ -169,7 +175,8 @@ def normalize_heading(heading: float):
 
 
 async def look_for_aruco_orbit(drone : System, video : VideoSource, detector, mtx, dist,
-                         center_ned : PositionNed, heading, radius, speed, marker_size=0.5):
+                         center_ned : PositionNed, heading, radius, speed, marker_size=0.5,
+                         camera_to_body=CAMERA_TO_BODY, camera_position_body=None):
     omega = speed / radius
     accumulated_angle = 0.0
     prev_radial = None
@@ -191,6 +198,7 @@ async def look_for_aruco_orbit(drone : System, video : VideoSource, detector, mt
         current_radius = sqrt(dx**2 + dy**2)
 
         if current_radius < 1e-3:
+            await asyncio.sleep(0.02)
             continue
 
         radial_x = dx / current_radius
@@ -226,9 +234,32 @@ async def look_for_aruco_orbit(drone : System, video : VideoSource, detector, mt
             AccelerationNed(an, ae, 0.0)
         )
 
-        result = detect_aruco_distances_and_yaw(video, detector, mtx, dist, marker_size)
+        result = None
+        if video.frame_available():
+            frame = video.frame()
+            if frame is not None:
+                frame = frame.copy()
+                pv = await fc.get_drone_ned_position_velocity(drone)
+                attitude = await fc.get_drone_attitude_euler(drone)
+                frame_time = time.perf_counter()
+                cache = getattr(drone, "_telemetry_cache", None)
+                position_age = cache.age("position_velocity_ned") if cache is not None else float("nan")
+                attitude_age = cache.age("attitude_euler") if cache is not None else float("nan")
+                corners, ids, _ = await asyncio.to_thread(detector.detectMarkers, frame)
+                if ids is not None:
+                    rvecs, tvecs, _ = my_estimatePoseSingleMarkers(corners, marker_size, mtx, dist)
+                    result = get_aruco_distances_and_yaw(
+                        rvecs, tvecs, camera_to_body, camera_position_body)
         if result is not None:
-            target_ned = await calculate_target_ned_position(drone,result)
+            target_ned = await calculate_target_ned_position(
+                drone, result, position=pv.position, attitude=attitude)
+            target_ned.down_m = center_ned.down_m
+            logging.info(
+                "Orbit detected id=%s frame_at=%.3f detection_ms=%.1f position_age_at_frame=%.3fs attitude_age_at_frame=%.3fs target=(%.3f, %.3f)",
+                int(np.asarray(ids).ravel()[0]), frame_time, (time.perf_counter() - frame_time) * 1000,
+                position_age, attitude_age,
+                target_ned.north_m, target_ned.east_m,
+            )
             handoff = {}
             transition_task = asyncio.create_task(_smooth_move_to_target(
                 drone, target_ned, heading, (an, ae), speed,handoff
@@ -237,7 +268,7 @@ async def look_for_aruco_orbit(drone : System, video : VideoSource, detector, mt
             transition_task.target_xy = np.array([target_ned.north_m,target_ned.east_m])
             #await asyncio.sleep(0.5)
             return result,transition_task
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(1.0 / 30.0)
 
     return None, None # completed full orbit without finding aruco
 
@@ -263,8 +294,10 @@ async def _smooth_move_to_target(drone, target, heading, acceleration,
 
     result = ruckig.Ruckig(2).calculate(inp, trajectory)
     if result not in (ruckig.Result.Working, ruckig.Result.Finished):
+        logging.error("Orbit transition calculation failed: %s", result)
         return
     start = time.perf_counter()
+    logging.info("Orbit transition started: duration=%.3fs", trajectory.duration)
     while True:
         elapsed = time.perf_counter() - start
         p, v, a = map(np.asarray, trajectory.at_time(
@@ -279,8 +312,9 @@ async def _smooth_move_to_target(drone, target, heading, acceleration,
             AccelerationNed(float(a[0]), float(a[1]), 0.),
         )
         if elapsed >= trajectory.duration:
+            logging.info("Orbit transition completed")
             return
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(1.0 / 30.0)
         
 
 async def wait_gps_ctrl(drone, value=4, timeout=2.0):

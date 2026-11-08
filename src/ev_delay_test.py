@@ -127,8 +127,8 @@ if HAVE_FLIGHT:
                     msg.pose_covariance, msg.reset_counter)
             if self._cur is not None:
                 start = time.clock_gettime_ns(self.video.clock_id)
-                age = (time.perf_counter() - self._attitude_received_at) * 1000
-                stamp = getattr(self._attitude, "timestamp_us", None)
+                age = self._telemetry_cache.age("attitude_euler") * 1000
+                stamp = getattr(self.get_attitude(), "timestamp_us", None)
                 self._record("send", "requested", msg, start, age, stamp)
             self.sent_count += 1
             self.last_sent = msg

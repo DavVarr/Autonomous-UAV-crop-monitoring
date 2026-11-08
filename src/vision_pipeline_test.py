@@ -130,7 +130,9 @@ class FixedPoseTelemetry:
         )
 
     async def position_velocity_ned(self):
-        yield self._position_velocity
+        while True:
+            yield self._position_velocity
+            await asyncio.sleep(0.02)
 
     async def attitude_euler(self):
         while True:

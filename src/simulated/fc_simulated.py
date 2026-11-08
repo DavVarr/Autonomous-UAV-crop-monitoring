@@ -9,37 +9,115 @@ import ruckig
 import time
 import asyncio
 
+class TelemetryCache:
+    """One subscription per stream; ages are measured from receipt on the companion."""
+
+    def __init__(self, drone):
+        self.drone = drone
+        self._values, self._received_at, self._sequence = {}, {}, {}
+        self._events, self._tasks = {}, {}
+        self._closed = False
+
+    async def start(self):
+        if self._closed:
+            raise RuntimeError("Telemetry cache is closed")
+        existing = getattr(self.drone, "_telemetry_cache", None)
+        if existing is not None and existing is not self:
+            raise RuntimeError("Drone already has a telemetry cache")
+        self.drone._telemetry_cache = self
+        await asyncio.gather(self.get("position_velocity_ned"), self.get("attitude_euler"))
+        return self
+
+    async def _watch(self, name):
+        try:
+            async for value in getattr(self.drone.telemetry, name)():
+                previous = self._values.get(name)
+                timestamp = getattr(value, "timestamp_us", 0)
+                if previous is not None and timestamp and timestamp <= getattr(previous, "timestamp_us", 0):
+                    continue
+                self._values[name] = value
+                self._received_at[name] = time.perf_counter()
+                self._sequence[name] = self._sequence.get(name, 0) + 1
+                self._events[name].set()
+            raise RuntimeError(f"Telemetry stream {name} ended")
+        finally:
+            self._events[name].set()
+
+    def age(self, name):
+        return time.perf_counter() - self._received_at.get(name, float("-inf"))
+
+    def latest(self, name, max_age=0.5):
+        if self._closed:
+            raise RuntimeError("Telemetry cache is closed")
+        task = self._tasks.get(name)
+        if task is not None and task.done():
+            task.result()
+        return self._values.get(name) if self.age(name) <= max_age else None
+
+    async def get(self, name, max_age=0.5, fresh=False, timeout=5.0):
+        value = self.latest(name, max_age)
+        if value is not None and not fresh:
+            return value
+        if name not in self._tasks:
+            self._events[name] = asyncio.Event()
+            self._tasks[name] = asyncio.create_task(self._watch(name))
+        sequence = self._sequence.get(name, 0) if fresh else -1
+
+        async def wait_sample():
+            while True:
+                value = self.latest(name, max_age)
+                if value is not None and self._sequence[name] > sequence:
+                    return value
+                self._events[name].clear()
+                await self._events[name].wait()
+
+        return await asyncio.wait_for(wait_sample(), timeout)
+
+    async def close(self):
+        self._closed = True
+        for task in self._tasks.values():
+            task.cancel()
+        await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        if getattr(self.drone, "_telemetry_cache", None) is self:
+            del self.drone._telemetry_cache
+
 async def get_drone_home_position(drone: System) -> Position:
     async for position in drone.telemetry.home():
         return position
 
 async def get_drone_global_position(drone: System) -> Position:
+    cache = getattr(drone, "_telemetry_cache", None)
+    if cache is not None:
+        return await cache.get("position")
     async for position in drone.telemetry.position():
         return position
 
-async def get_drone_ned_position_velocity(drone: System) -> PositionVelocityNed:
+async def get_drone_ned_position_velocity(drone: System, fresh=False) -> PositionVelocityNed:
+    cache = getattr(drone, "_telemetry_cache", None)
+    if cache is not None:
+        return await cache.get("position_velocity_ned", fresh=fresh)
     async for position_velocity in drone.telemetry.position_velocity_ned():
         return position_velocity
     
-async def get_drone_ned_position(drone: System) -> PositionNed:
-    async for position_velocity in drone.telemetry.position_velocity_ned():
-        return position_velocity.position
+async def get_drone_ned_position(drone: System, fresh=False) -> PositionNed:
+    return (await get_drone_ned_position_velocity(drone, fresh=fresh)).position
 
 async def get_drone_altitude(drone: System) -> float:
     async for altitude in drone.telemetry.altitude():
         return altitude.altitude_amsl_m
 
 async def get_drone_heading(drone: System) -> float:
+    cache = getattr(drone, "_telemetry_cache", None)
+    if cache is not None:
+        return (await cache.get("attitude_euler")).yaw_deg % 360.0
     async for heading in drone.telemetry.heading():
         return heading.heading_deg
 
-async def get_drone_attitude_euler(drone: System):
-    """Return the latest roll/pitch/yaw telemetry sample in degrees."""
-    async for attitude in drone.telemetry.attitude_euler():
-        return attitude
-
 async def get_drone_attitude_euler(drone: System) -> EulerAngle:
     """Return the latest body attitude (roll, pitch, yaw) from telemetry."""
+    cache = getattr(drone, "_telemetry_cache", None)
+    if cache is not None:
+        return await cache.get("attitude_euler")
     async for attitude in drone.telemetry.attitude_euler():
         return attitude
     
@@ -109,7 +187,7 @@ async def check_ned_position_reached(drone: System, target_position: PositionNed
         return False
 
 async def check_ned_position_reached_with_velocity(drone: System, target_position: PositionNedYaw, tolerance: float, velocity_threshold: float):
-    position_velocity = await get_drone_ned_position_velocity(drone)
+    position_velocity = await get_drone_ned_position_velocity(drone, fresh=True)
     distance_to_target = ((position_velocity.position.north_m - target_position.north_m) ** 2 +
                             (position_velocity.position.east_m - target_position.east_m) ** 2 +
                             (position_velocity.position.down_m - target_position.down_m) ** 2) ** 0.5
@@ -237,7 +315,7 @@ async def fly_to_ned_smooth(drone: System,
         if t >= traj.duration:
             # print("Trajectory successfully completed!")
             break
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(1.0 / 30.0)
     while True:
         pos_vel_reached = await check_ned_position_reached_with_velocity(
             drone, PositionNedYaw(*inp.target_position, float("nan")), tolerance=threshold, velocity_threshold=velocity_threshold)
@@ -288,7 +366,7 @@ async def fly_to_ned_recomp(drone: System,
     last_acceleration = np.array([0.0, 0.0, 0.0])
     while True:
 
-        pv = await get_drone_ned_position_velocity(drone)
+        pv = await get_drone_ned_position_velocity(drone, fresh=True)
 
         position_ned = np.array([
             pv.position.north_m, pv.position.east_m, pv.position.down_m,

@@ -1,7 +1,7 @@
 import asyncio
 import time
+import logging
 from dataclasses import dataclass
-from contextlib import suppress
 
 import cv2
 import numpy as np
@@ -24,6 +24,7 @@ class ArucoObservation:
     rvec: np.ndarray
     tvec: np.ndarray
     timestamp: float
+    marker_id: int | None = None
 
 
 class VisualOdometry:
@@ -49,10 +50,7 @@ class VisualOdometry:
         self._R_ned_marker = self._p_ned_marker = None
         self._latest = None
         self._last_corners = None
-        self._attitude = None
-        self._attitude_received_at = 0.0
-        self._attitude_ready = asyncio.Event()
-        self._attitude_task = None
+        self._telemetry_cache = None
 
         self._ready = asyncio.Event()
         self._fusion_enabled = False
@@ -72,10 +70,28 @@ class VisualOdometry:
         self._initialize_after = time.perf_counter()
 
     async def wait_frame_ready(self):
-        await self._frame_ready.wait()
+        await self._wait_event(self._frame_ready, "marker-frame initialization")
 
     async def wait_ready(self):
-        await self._ready.wait()
+        await self._wait_event(self._ready, "10 observations")
+
+    async def _wait_event(self, event, stage):
+        start = time.perf_counter()
+        logging.info("VO waiting for %s", stage)
+        while not event.is_set():
+            try:
+                await asyncio.wait_for(event.wait(), 2.0)
+            except asyncio.TimeoutError:
+                obs, cache = self._latest, self._telemetry_cache
+                logging.info(
+                    "VO waiting for %s %.1fs: valid=%d last_id=%s obs_age=%.3fs attitude_age=%.3fs position_age=%.3fs",
+                    stage, time.perf_counter() - start, self._valid,
+                    getattr(obs, "marker_id", None),
+                    time.perf_counter() - obs.timestamp if obs is not None else float("inf"),
+                    cache.age("attitude_euler") if cache is not None else float("inf"),
+                    cache.age("position_velocity_ned") if cache is not None else float("inf"),
+                )
+        logging.info("VO %s ready after %.2fs", stage, time.perf_counter() - start)
 
     def get_observation(self, max_age=0.15):
         obs = self._latest
@@ -151,6 +167,7 @@ class VisualOdometry:
             np.asarray(rvecs[0], float).reshape(3),
             np.asarray(tvecs[0], float).reshape(3),
             timestamp,
+            int(ids[i]),
         )
 
     def _marker_in_body(self, obs):
@@ -210,31 +227,21 @@ class VisualOdometry:
         )
 
     async def run(self, drone):
-        self._attitude_task = asyncio.create_task(self._cache_attitude(drone))
+        self._telemetry_cache = getattr(drone, "_telemetry_cache", None)
+        owns_cache = self._telemetry_cache is None
+        if owns_cache:
+            self._telemetry_cache = fc.TelemetryCache(drone)
         try:
-            await asyncio.wait_for(self._attitude_ready.wait(), 10.0)
+            await self._telemetry_cache.start()
             await self._run(drone)
         finally:
-            self._attitude_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._attitude_task
-
-    async def _cache_attitude(self, drone):
-        async for attitude in drone.telemetry.attitude_euler():
-            if (self._attitude is not None and getattr(attitude, "timestamp_us", 0)
-                    and attitude.timestamp_us <= getattr(self._attitude, "timestamp_us", 0)):
-                continue
-            self._attitude = attitude
-            self._attitude_received_at = time.perf_counter()
-            self._attitude_ready.set()
-        raise RuntimeError("Attitude telemetry stream ended")
+            if owns_cache:
+                await self._telemetry_cache.close()
 
     def get_attitude(self, max_age=0.5):
-        if self._attitude_task is not None and self._attitude_task.done():
-            self._attitude_task.result()
-        if self._attitude is None or time.perf_counter() - self._attitude_received_at > max_age:
-            return None
-        return self._attitude
+        if self._telemetry_cache is not None:
+            return self._telemetry_cache.latest("attitude_euler", max_age)
+        return None
 
     async def _run(self, drone):
         last_frame = None
