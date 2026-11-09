@@ -178,6 +178,7 @@ async def align_to_aruco_ruckig_adaptive(
     phase1_minimum_acceleration=0.08, phase1_maximum_acceleration=1.5,
     maximum_velocity=3.0, maximum_acceleration=3.0, maximum_jerk=2.0,
     target_altitude=1.0, marker_loss_timeout=2.0, trajectory_check_dt=0.02,
+    hover_position_threshold=0.1, hover_velocity_threshold=0.1, hover_stable_time=0.5,
 ) -> bool:
     mtx, C = vision.mtx, vision.camera_to_body
     heading = await fc.get_drone_heading(drone)
@@ -301,6 +302,36 @@ async def align_to_aruco_ruckig_adaptive(
     target_yaw = np.arctan2(marker_forward[1], marker_forward[0])
 
     final_position = _rotate_frame(full_target, heading, True)
+    await drone.offboard.set_position_ned(PositionNedYaw(*map(float, final_position), heading))
+    hover_start = next_log = time.perf_counter()
+    good_since = None
+    logging.info("Waiting for pre-yaw hover: position<=%.3fm speed<=%.3fm/s for %.2fs",
+                 hover_position_threshold, hover_velocity_threshold, hover_stable_time)
+    while True:
+        pv = await fc.get_drone_ned_position_velocity(drone, fresh=True)
+        now = time.perf_counter()
+        position_error = np.linalg.norm(np.array([
+            pv.position.north_m, pv.position.east_m, pv.position.down_m,
+        ]) - final_position)
+        speed = np.linalg.norm([
+            pv.velocity.north_m_s, pv.velocity.east_m_s, pv.velocity.down_m_s,
+        ])
+        if position_error <= hover_position_threshold and speed <= hover_velocity_threshold:
+            if good_since is None:
+                good_since = now
+            if now - good_since >= hover_stable_time:
+                logging.info("Pre-yaw hover settled after %.2fs: position_error=%.3fm speed=%.3fm/s stable_for=%.2fs",
+                             now - hover_start, position_error, speed, now - good_since)
+                break
+        else:
+            good_since = None
+        if now >= next_log:
+            logging.info("Pre-yaw hover waiting %.1fs: position_error=%.3fm speed=%.3fm/s stable_for=%.2fs",
+                         now - hover_start, position_error, speed,
+                         now - good_since if good_since is not None else 0.)
+            next_log = now + 1.0
+        await asyncio.sleep(1.0 / 30.0)
+
     logging.info("Waiting for visual yaw anchor")
     anchor_start = time.perf_counter()
     while not vision.enable_visual_yaw(final_position):
