@@ -178,6 +178,7 @@ async def align_to_aruco_ruckig_adaptive(
     phase1_minimum_acceleration=0.08, phase1_maximum_acceleration=1.5,
     maximum_velocity=3.0, maximum_acceleration=3.0, maximum_jerk=2.0,
     target_altitude=1.0, marker_loss_timeout=2.0, trajectory_check_dt=0.02,
+    yaw_d_gain=0.3, yaw_d_velocity_limit=0.1,
 ) -> bool:
     mtx, C = vision.mtx, vision.camera_to_body
     heading = await fc.get_drone_heading(drone)
@@ -310,14 +311,16 @@ async def align_to_aruco_ruckig_adaptive(
         await asyncio.sleep(0.05)
     attitude = await fc.get_drone_attitude_euler(drone)
     yaw_setpoint = np.deg2rad(attitude.yaw_deg)
-    logging.info("Final yaw started: actual=%.2f target=%.2f", attitude.yaw_deg, np.degrees(target_yaw))
+    logging.info("Final yaw started: actual=%.2f target=%.2f d_gain=%.2f d_limit=%.2fm/s",
+                 attitude.yaw_deg, np.degrees(target_yaw), yaw_d_gain, yaw_d_velocity_limit)
 
-    max_yaw_rate = np.deg2rad(30.)
-    yaw_gain = 0.5                   # 1/s
+    max_yaw_rate = np.deg2rad(75.)
+    yaw_gain = 3                   # 1/s
     tolerance = np.deg2rad(1.)
 
     last = time.perf_counter()
     next_log = last
+    hold_start = None
     while True:
         now = time.perf_counter()
         dt = now - last
@@ -330,9 +333,16 @@ async def align_to_aruco_ruckig_adaptive(
         step = np.sign(error) * min(abs(yaw_rate) * dt, abs(error))
         yaw_setpoint += step
 
-        await drone.offboard.set_position_ned(
-            PositionNedYaw(
-                *map(float, final_position), np.degrees(_wrap_pi(yaw_setpoint))))
+        pv = await fc.get_drone_ned_position_velocity(drone)
+        # For the fixed XY target, the position-error derivative is -velocity.
+        d_velocity = -yaw_d_gain * np.array([pv.velocity.north_m_s, pv.velocity.east_m_s])
+        d_velocity *= min(1.0, yaw_d_velocity_limit / max(np.linalg.norm(d_velocity), 1e-6))
+        position_setpoint = PositionNedYaw(*map(float, final_position), np.degrees(_wrap_pi(yaw_setpoint)))
+        await drone.offboard.set_position_velocity_acceleration_ned(
+            position_setpoint,
+            VelocityNedYaw(float(d_velocity[0]), float(d_velocity[1]), 0., position_setpoint.yaw_deg),
+            AccelerationNed(0., 0., 0.),
+        )
 
         attitude = await fc.get_drone_attitude_euler(drone)
         actual_error = _wrap_pi(
@@ -340,11 +350,17 @@ async def align_to_aruco_ruckig_adaptive(
         )
 
         if now >= next_log:
-            logging.info("Final yaw command: setpoint=%.2f actual=%.2f target=%.2f error=%.2f",
+            logging.info("Final yaw command: setpoint=%.2f actual=%.2f target=%.2f error=%.2f d_v=(%.3f,%.3f)m/s phase=%s",
                          np.degrees(_wrap_pi(yaw_setpoint)), attitude.yaw_deg,
-                         np.degrees(target_yaw), np.degrees(actual_error))
+                         np.degrees(target_yaw), np.degrees(actual_error), *d_velocity,
+                         "yaw" if hold_start is None else "hold")
             next_log = now + 1.0
-        if abs(actual_error) < tolerance and abs(error) < tolerance:
+        if hold_start is None and abs(actual_error) < tolerance and abs(error) < tolerance:
             logging.info("Final yaw completed: actual=%.2f error=%.2f", attitude.yaw_deg, np.degrees(actual_error))
+            logging.info("Post-yaw hold started: duration=5s")
+            hold_start = now
+        if hold_start is not None and now - hold_start >= 5.0:
+            await drone.offboard.set_position_ned(position_setpoint)  # Clear D before handing control back.
+            logging.info("Post-yaw hold completed; recovering altitude")
             return True
         await asyncio.sleep(1.0 / 30.0)

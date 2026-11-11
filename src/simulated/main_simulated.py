@@ -376,7 +376,6 @@ async def align_ruckig_fov_safe(drone,vision,initial_state,return_down):
     )    
     if not success:
         return False
-    await asyncio.sleep(5)
     print("-- Alignment complete, returning to altitude")
     pos = await fc.get_drone_ned_position(drone)
     await fc.fly_to_ned_smooth(

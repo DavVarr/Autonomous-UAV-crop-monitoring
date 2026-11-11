@@ -344,13 +344,10 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
 
 async def align_ruckig_fov_safe(drone,vision,initial_state,return_down,frame_width,frame_height):
     success = await align_to_aruco_ruckig_adaptive(drone,vision,
-        frame_width=frame_width, frame_height=frame_height, initial_state=initial_state
+        frame_width=frame_width, frame_height=frame_height, initial_state=initial_state, yaw_d_gain=0.2
     )
     if not success:
         return False
-    logging.info("Post-yaw hold started: duration=5s")
-    await asyncio.sleep(5)
-    logging.info("Post-yaw hold completed; recovering altitude")
     # print("-- Alignment complete, returning to altitude")
     pos = await fc.get_drone_ned_position(drone)
     await fc.fly_to_ned_smooth(
