@@ -209,27 +209,36 @@ async def align_to_aruco_ruckig_adaptive(
         )[:2]
 
 
-    loss_start = None
+    next_plan_log = 0.0
 
+    # Marker-loss cancellation is owned by the mission wrapper.
     while True:
-        pv = await fc.get_drone_ned_position_velocity(drone)
-        attitude = await fc.get_drone_attitude_euler(drone)
-        now = time.perf_counter()
+        if phase1_trajectory is not None:
+            p, v, a = map(np.asarray, phase1_trajectory.at_time(
+                min(time.perf_counter() - phase1_start, phase1_trajectory.duration)))
+            p = _rotate_frame(np.r_[p, altitude_hold], heading, True)
+            v, a = (_rotate_frame(np.r_[x, np.nan], heading, True) for x in (v, a))
+            await drone.offboard.set_position_velocity_acceleration_ned(
+                PositionNedYaw(*map(float, p), heading),
+                VelocityNedYaw(*map(float, v), heading),
+                AccelerationNed(*map(float, a)),
+            )
 
+        observation = vision.get_observation()
+        if observation is not None:
+            pv = await fc.get_drone_ned_position_velocity(drone)
+            attitude = await fc.get_drone_attitude_euler(drone)
+            observation = _observe(
+                vision.get_observation(), mtx, vision.marker_size, attitude, heading, C)
+        if observation is None:
+            # Only replanning needs a fresh observation; the active reference was sent above.
+            await asyncio.sleep(1.0 / 30.0)
+            continue
+
+        now = time.perf_counter()
         position_ned = np.array([pv.position.north_m, pv.position.east_m, pv.position.down_m])
         velocity_ned = np.array([pv.velocity.north_m_s, pv.velocity.east_m_s, pv.velocity.down_m_s])
         position, velocity = (_rotate_frame(x, heading) for x in (position_ned, velocity_ned))
-
-        observation = _observe(
-            vision.get_observation(), mtx, vision.marker_size, attitude, heading, C)
-        if observation is None:
-            loss_start = now if loss_start is None else loss_start
-            if now - loss_start > marker_loss_timeout:
-                return False
-            await asyncio.sleep(0.05)
-            continue
-
-        loss_start = None
         virtual_corners, _, relative_corners= observation
 
         full_target = marker_world - [0., 0., target_altitude]
@@ -245,12 +254,21 @@ async def align_to_aruco_ruckig_adaptive(
             p_ref, v_ref, a_ref = map(np.asarray, phase1_trajectory.at_time(t))
             full_p, full_v, full_a = np.r_[p_ref, altitude_hold], np.r_[v_ref, 0.], np.r_[a_ref, 0.]
 
+        plan_start = time.perf_counter()
         trajectory = _make_trajectory(
             full_p, full_v, full_a, full_target,
             maximum_velocity, maximum_acceleration, maximum_jerk,
         )
-        if trajectory is not None and _trajectory_safe(
-            trajectory, marker_corners_world, mtx, C, frame_width, frame_height, trajectory_check_dt,fov_margin):
+        generated = time.perf_counter()
+        safe = trajectory is not None and await asyncio.to_thread(
+            _trajectory_safe, trajectory, marker_corners_world, mtx, C,
+            frame_width, frame_height, trajectory_check_dt, fov_margin)
+        checked = time.perf_counter()
+        if safe or checked >= next_plan_log:
+            logging.info("Alignment planning: generation_ms=%.1f fov_check_ms=%.1f safe=%s",
+                         (generated - plan_start) * 1000, (checked - generated) * 1000, safe)
+            next_plan_log = checked + 1.0
+        if safe:
             break
 
         if phase1_trajectory is None:
@@ -270,16 +288,6 @@ async def align_to_aruco_ruckig_adaptive(
             return False
         #print("phase1")
         phase1_start = now
-        p, v, a = map(np.asarray, phase1_trajectory.at_time(
-            min(time.perf_counter() - phase1_start, phase1_trajectory.duration)))
-        p = _rotate_frame(np.r_[p, altitude_hold], heading, True)
-        v, a = (_rotate_frame(np.r_[x, np.nan], heading, True) for x in (v, a))
-
-        await drone.offboard.set_position_velocity_acceleration_ned(
-            PositionNedYaw(*map(float, p), heading),
-            VelocityNedYaw(*map(float, v), heading),
-            AccelerationNed(*map(float, a)),
-        )
         await asyncio.sleep(1.0 / 30.0)
     #print("phase2")
     logging.info("Alignment descent started: duration=%.3fs", trajectory.duration)
