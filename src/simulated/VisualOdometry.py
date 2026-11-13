@@ -209,6 +209,7 @@ class VisualOdometry:
         # Fixed marker pose in the existing PX4 local-NED frame.
         self._R_ned_marker = R_ned_body @ R_body_marker
         self._p_ned_marker = p_ned_body + R_ned_body @ p_body_marker
+        self.marker_id = obs.marker_id
         return True
 
     def _local_body_pose(self, obs, attitude):
