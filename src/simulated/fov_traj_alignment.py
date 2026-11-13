@@ -328,11 +328,17 @@ async def align_to_aruco_ruckig_adaptive(
 
     last = time.perf_counter()
     next_log = last
+    next_d_log = last
+    cache = getattr(drone, "_telemetry_cache", None)
+    last_pv = None
+    pv_updates = pv_reuses = 0
+    max_loop_ms = max_rpc_ms = 0.0
     hold_start = None
     while True:
         now = time.perf_counter()
         dt = now - last
         last = now
+        max_loop_ms = max(max_loop_ms, dt * 1000)
 
         error = _wrap_pi(target_yaw - yaw_setpoint)
         yaw_rate = np.clip(yaw_gain * error, -max_yaw_rate, max_yaw_rate)
@@ -341,16 +347,35 @@ async def align_to_aruco_ruckig_adaptive(
         step = np.sign(error) * min(abs(yaw_rate) * dt, abs(error))
         yaw_setpoint += step
 
+        get_start = time.perf_counter()
         pv = await fc.get_drone_ned_position_velocity(drone)
+        got_pv = time.perf_counter()
+        # Snapshot receipt metadata for this exact sample before the send can yield.
+        pv_received_at, pv_sequence = float("nan"), -1
+        if cache is not None and cache._values.get("position_velocity_ned") is pv:
+            pv_received_at = cache._received_at["position_velocity_ned"]
+            pv_sequence = cache._sequence["position_velocity_ned"]
+        if pv is last_pv:
+            pv_reuses += 1
+        else:
+            pv_updates += 1
+        last_pv = pv
+
         # For the fixed XY target, the position-error derivative is -velocity.
-        d_velocity = -yaw_d_gain * np.array([pv.velocity.north_m_s, pv.velocity.east_m_s])
-        d_velocity *= min(1.0, yaw_d_velocity_limit / max(np.linalg.norm(d_velocity), 1e-6))
+        velocity_ne = np.array([pv.velocity.north_m_s, pv.velocity.east_m_s])
+        d_velocity = -yaw_d_gain * velocity_ne
+        d_scale = min(1.0, yaw_d_velocity_limit / max(np.linalg.norm(d_velocity), 1e-6))
+        d_velocity *= d_scale
         position_setpoint = PositionNedYaw(*map(float, final_position), np.degrees(_wrap_pi(yaw_setpoint)))
+        send_start = time.perf_counter()
         await drone.offboard.set_position_velocity_acceleration_ned(
             position_setpoint,
             VelocityNedYaw(float(d_velocity[0]), float(d_velocity[1]), 0., position_setpoint.yaw_deg),
             AccelerationNed(0., 0., 0.),
         )
+        sent_at = time.perf_counter()
+        rpc_ms = (sent_at - send_start) * 1000
+        max_rpc_ms = max(max_rpc_ms, rpc_ms)
 
         attitude = await fc.get_drone_attitude_euler(drone)
         actual_error = _wrap_pi(
@@ -363,6 +388,23 @@ async def align_to_aruco_ruckig_adaptive(
                          np.degrees(target_yaw), np.degrees(actual_error), *d_velocity,
                          "yaw" if hold_start is None else "hold")
             next_log = now + 1.0
+        if sent_at >= next_d_log:
+            error_ne = final_position[:2] - [pv.position.north_m, pv.position.east_m]
+            logging.info(
+                "Yaw D feedback: t=%.3f phase=%s err_ne=(%.3f,%.3f)m v_ne=(%.3f,%.3f)m/s d_raw=(%.3f,%.3f)m/s d_sent=(%.3f,%.3f)m/s scale=%.3f attitude_us=%d",
+                send_start, "yaw" if hold_start is None else "hold", *error_ne,
+                *velocity_ne, *(-yaw_d_gain * velocity_ne), *d_velocity, d_scale,
+                getattr(attitude, "timestamp_us", 0),
+            )
+            logging.info(
+                "Yaw D timing: t=%.3f pv_seq=%d pv_rx=%.3f pv_age_ms=%.1f get_ms=%.1f rpc_ms=%.1f max_rpc_ms=%.1f loop_ms=%.1f max_loop_ms=%.1f updates/reuses=%d/%d",
+                send_start, pv_sequence, pv_received_at, (send_start - pv_received_at) * 1000,
+                (got_pv - get_start) * 1000, rpc_ms, max_rpc_ms, dt * 1000,
+                max_loop_ms, pv_updates, pv_reuses,
+            )
+            next_d_log = sent_at + 0.2
+            pv_updates = pv_reuses = 0
+            max_loop_ms = max_rpc_ms = 0.0
         if hold_start is None and abs(actual_error) < tolerance and abs(error) < tolerance:
             logging.info("Final yaw completed: actual=%.2f error=%.2f", attitude.yaw_deg, np.degrees(actual_error))
             logging.info("Post-yaw hold started: duration=5s")
