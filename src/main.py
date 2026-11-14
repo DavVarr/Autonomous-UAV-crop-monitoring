@@ -76,6 +76,11 @@ async def run():
 
     telemetry = fc.TelemetryCache(drone)
     try:
+        # Request telemetry rates so we can use mav_1_mode = normal to avoid unncesessary high rates messages that saturate the slow serial link.
+        await drone.telemetry.set_rate_position_velocity_ned(10.0)
+        await drone.telemetry.set_rate_attitude_euler(20.0)
+        await drone.telemetry.set_rate_position(5.0)
+        logging.info("Telemetry rates requested: position_velocity_ned=10Hz attitude_euler=20Hz position=5Hz")
         await telemetry.start()
         await _run_mission(drone, config)
     finally:
