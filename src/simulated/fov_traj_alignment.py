@@ -178,7 +178,7 @@ async def align_to_aruco_ruckig_adaptive(
     phase1_minimum_acceleration=0.08, phase1_maximum_acceleration=1.5,
     maximum_velocity=3.0, maximum_acceleration=3.0, maximum_jerk=2.0,
     target_altitude=1.0, marker_loss_timeout=2.0, trajectory_check_dt=0.02,
-    yaw_d_gain=0.3, yaw_d_velocity_limit=0.1,
+    yaw_d_gain=0.3, yaw_d_velocity_limit=0.1, yaw_hold_d_gain=None,
 ) -> bool:
     mtx, C = vision.mtx, vision.camera_to_body
     heading = await fc.get_drone_heading(drone)
@@ -319,8 +319,9 @@ async def align_to_aruco_ruckig_adaptive(
         await asyncio.sleep(0.05)
     attitude = await fc.get_drone_attitude_euler(drone)
     yaw_setpoint = np.deg2rad(attitude.yaw_deg)
-    logging.info("Final yaw started: actual=%.2f target=%.2f d_gain=%.2f d_limit=%.2fm/s",
-                 attitude.yaw_deg, np.degrees(target_yaw), yaw_d_gain, yaw_d_velocity_limit)
+    yaw_hold_d_gain = yaw_d_gain if yaw_hold_d_gain is None else yaw_hold_d_gain
+    logging.info("Final yaw started: actual=%.2f target=%.2f d_gain=%.2f d_limit=%.2fm/s hold_d_gain=%.2f",
+                 attitude.yaw_deg, np.degrees(target_yaw), yaw_d_gain, yaw_d_velocity_limit, yaw_hold_d_gain)
 
     max_yaw_rate = np.deg2rad(75.)
     yaw_gain = 3                   # 1/s
@@ -363,7 +364,8 @@ async def align_to_aruco_ruckig_adaptive(
 
         # For the fixed XY target, the position-error derivative is -velocity.
         velocity_ne = np.array([pv.velocity.north_m_s, pv.velocity.east_m_s])
-        d_velocity = -yaw_d_gain * velocity_ne
+        d_gain = yaw_d_gain if hold_start is None else yaw_hold_d_gain
+        d_velocity = -d_gain * velocity_ne
         d_scale = min(1.0, yaw_d_velocity_limit / max(np.linalg.norm(d_velocity), 1e-6))
         d_velocity *= d_scale
         position_setpoint = PositionNedYaw(*map(float, final_position), np.degrees(_wrap_pi(yaw_setpoint)))
@@ -391,10 +393,10 @@ async def align_to_aruco_ruckig_adaptive(
         if sent_at >= next_d_log:
             error_ne = final_position[:2] - [pv.position.north_m, pv.position.east_m]
             logging.info(
-                "Yaw D feedback: t=%.3f phase=%s err_ne=(%.3f,%.3f)m v_ne=(%.3f,%.3f)m/s d_raw=(%.3f,%.3f)m/s d_sent=(%.3f,%.3f)m/s scale=%.3f attitude_us=%d",
+                "Yaw D feedback: t=%.3f phase=%s err_ne=(%.3f,%.3f)m v_ne=(%.3f,%.3f)m/s d_raw=(%.3f,%.3f)m/s d_sent=(%.3f,%.3f)m/s scale=%.3f attitude_us=%d d_gain=%.2f",
                 send_start, "yaw" if hold_start is None else "hold", *error_ne,
-                *velocity_ne, *(-yaw_d_gain * velocity_ne), *d_velocity, d_scale,
-                getattr(attitude, "timestamp_us", 0),
+                *velocity_ne, *(-d_gain * velocity_ne), *d_velocity, d_scale,
+                getattr(attitude, "timestamp_us", 0), d_gain,
             )
             logging.info(
                 "Yaw D timing: t=%.3f pv_seq=%d pv_rx=%.3f pv_age_ms=%.1f get_ms=%.1f rpc_ms=%.1f max_rpc_ms=%.1f loop_ms=%.1f max_loop_ms=%.1f updates/reuses=%d/%d",

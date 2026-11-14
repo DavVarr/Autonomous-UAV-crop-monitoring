@@ -8,6 +8,7 @@ import numpy as np
 import ruckig
 import time
 import asyncio
+import logging
 
 class TelemetryCache:
     """One subscription per stream; ages are measured from receipt on the companion."""
@@ -253,7 +254,8 @@ def horizontal_distance(lat1, lon1, lat2, lon2):
 async def fly_to_global(drone: System,
                          target_lat, target_lon, target_alt,
                          heading=float('nan'),
-                         max_velocity=10.0, max_acceleration=3.0, max_jerk=4.0, launch_down=None):
+                         max_velocity=10.0, max_acceleration=3.0, max_jerk=4.0, launch_down=None,
+                         velocity_threshold=0.1, settle_time=0.0):
     M_PER_DEG_LAT = 111_320.0
  
     gpos = await get_drone_global_position(drone)
@@ -269,7 +271,8 @@ async def fly_to_global(drone: System,
     )
  
     await fly_to_ned_smooth(drone, target, threshold=0.2, max_velocity=max_velocity,
-                             max_acceleration=max_acceleration, max_jerk=max_jerk)
+                             max_acceleration=max_acceleration, max_jerk=max_jerk,
+                             velocity_threshold=velocity_threshold, settle_time=settle_time)
     #await asyncio.sleep(0.5) 
 
 
@@ -277,7 +280,7 @@ async def fly_to_global(drone: System,
 async def fly_to_ned_smooth(drone: System,
                             target: PositionNedYaw,
                             threshold: float = 0.3, velocity_threshold = 0.1,
-                            max_velocity=3.0,max_acceleration=3.0,max_jerk=2.0):
+                            max_velocity=3.0,max_acceleration=3.0,max_jerk=2.0, settle_time=0.0):
 
     otg = ruckig.Ruckig(3)
     traj = ruckig.Trajectory(3)
@@ -316,11 +319,23 @@ async def fly_to_ned_smooth(drone: System,
             # print("Trajectory successfully completed!")
             break
         await asyncio.sleep(1.0 / 30.0)
+    arrival_start = last_check = time.perf_counter()
+    good_since = None
+    logging.info("NED reference completed: position_limit=%.2fm speed_limit=%.2fm/s settle=%.1fs",
+                 threshold, velocity_threshold, settle_time)
     while True:
         pos_vel_reached = await check_ned_position_reached_with_velocity(
             drone, PositionNedYaw(*inp.target_position, float("nan")), tolerance=threshold, velocity_threshold=velocity_threshold)
+        now = time.perf_counter()
+        # Do not count a telemetry gap as continuously settled hover.
+        if not pos_vel_reached or now - last_check > 0.5:
+            good_since = None
+        last_check = now
         if pos_vel_reached:
-            return
+            good_since = now if good_since is None else good_since
+            if now - good_since >= settle_time:
+                logging.info("NED arrival settled: wait=%.2fs stable=%.2fs", now - arrival_start, now - good_since)
+                return
 async def fly_to_ned_recomp(drone: System,
                             target: PositionNedYaw,
                             threshold: float = 0.3):
