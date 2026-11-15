@@ -351,7 +351,7 @@ async def align_noGPS_with_failsafe(drone, vision : VisualOdometry, transition_t
 async def align_ruckig_fov_safe(drone,vision,initial_state,return_down,frame_width,frame_height):
     success = await align_to_aruco_ruckig_adaptive(drone,vision,
         frame_width=frame_width, frame_height=frame_height, initial_state=initial_state,
-        yaw_d_gain=1.0, yaw_d_velocity_limit=0.30, yaw_hold_d_gain=1.0
+        yaw_d_gain=1.0, yaw_d_velocity_limit=0.30
     )
     if not success:
         return False
