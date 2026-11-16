@@ -1,5 +1,5 @@
 {
-  "system_address": "serial:///dev/serial0:57600",
+  "system_address": "serial:///dev/serial0:921600",
   "waypoints": [],
   "camera": {
     "resolution": [800, 600],
